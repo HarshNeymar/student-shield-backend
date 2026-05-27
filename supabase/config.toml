@@ -1,0 +1,10 @@
+project_id = "fbzsnpfdhoyyeikhkyxk"
+
+[functions.create-student]
+verify_jwt = false
+
+[functions.create-school-admin]
+verify_jwt = false
+
+[functions.create-teacher]
+verify_jwt = false
