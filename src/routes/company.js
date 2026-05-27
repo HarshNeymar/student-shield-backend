@@ -6,13 +6,13 @@ import {
   createSchoolAdmin,
   getCallerRoles,
 } from '../services/userProvisioning.js';
+import { listAllClaimsForCompany, updateClaimStatus } from './claims.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 async function assertCompanyAdmin(req) {
   const roles = await getCallerRoles(req.user.id);
-
   const isCompanyAdmin = roles.some((r) => r.role === 'company_admin');
 
   if (!isCompanyAdmin) {
@@ -34,28 +34,263 @@ function countPlanDistribution(enrollments = []) {
   };
 
   for (const item of enrollments) {
-    const planValue = String(
-      item.plan_tier ?? item.plan ?? ''
-    ).toLowerCase();
+    const plan = String(item.plan_tier ?? item.plan ?? '').toLowerCase();
 
-    if (counts[planValue] !== undefined) {
-      counts[planValue] += 1;
+    if (counts[plan] !== undefined) {
+      counts[plan] += 1;
     }
   }
 
-  const total = counts.basic + counts.standard + counts.premium;
-
   return {
     ...counts,
-    total,
+    total: counts.basic + counts.standard + counts.premium,
+  };
+}
+
+async function getProfilesByRole(role, schoolId = null) {
+  let roleQuery = adminClient
+    .from('user_roles')
+    .select('user_id, school_id')
+    .eq('role', role);
+
+  if (schoolId) {
+    roleQuery = roleQuery.eq('school_id', schoolId);
+  }
+
+  const { data: roles, error: roleError } = await roleQuery;
+
+  if (roleError) {
+    throw new Error(roleError.message);
+  }
+
+  const userIds = (roles ?? []).map((r) => r.user_id).filter(Boolean);
+
+  if (!userIds.length) {
+    return [];
+  }
+
+  const { data: profiles, error: profileError } = await adminClient
+    .from('profiles')
+    .select(
+      'id, full_name, email, phone, parent_phone, age, class_assigned, school_id, created_at'
+    )
+    .in('id', userIds);
+
+  if (profileError) {
+    throw new Error(profileError.message);
+  }
+
+  const roleSchoolMap = new Map(
+    (roles ?? []).map((r) => [r.user_id, r.school_id])
+  );
+
+  return (profiles ?? []).map((profile) => ({
+    ...profile,
+    school_id: profile.school_id ?? roleSchoolMap.get(profile.id) ?? null,
+  }));
+}
+
+async function getSchoolEnrollments(schoolId) {
+  const selectWithNewColumns = `
+    id,
+    student_id,
+    school_id,
+    teacher_id,
+    plan,
+    plan_tier,
+    plan_duration,
+    amount,
+    payment_mode,
+    payment_type,
+    payment_status,
+    installment_dates,
+    enrolled_at,
+    expires_at,
+    created_at
+  `;
+
+  const selectFallback = `
+    id,
+    student_id,
+    school_id,
+    teacher_id,
+    plan,
+    amount,
+    payment_status,
+    enrolled_at,
+    expires_at,
+    created_at
+  `;
+
+  let result = await adminClient
+    .from('enrollments')
+    .select(selectWithNewColumns)
+    .eq('school_id', schoolId)
+    .order('enrolled_at', { ascending: false });
+
+  if (!result.error) {
+    return result.data ?? [];
+  }
+
+  console.warn(
+    'School overview enrollment query fallback:',
+    result.error.message
+  );
+
+  result = await adminClient
+    .from('enrollments')
+    .select(selectFallback)
+    .eq('school_id', schoolId)
+    .order('enrolled_at', { ascending: false });
+
+  if (result.error) {
+    throw new Error(result.error.message);
+  }
+
+  return result.data ?? [];
+}
+
+async function getSchoolPayments(schoolId) {
+  const { data: enrollments, error: enrollError } = await adminClient
+    .from('enrollments')
+    .select('id, school_id')
+    .eq('school_id', schoolId);
+
+  if (enrollError) {
+    console.warn('School payments enrollment lookup failed:', enrollError.message);
+    return [];
+  }
+
+  const enrollmentIds = (enrollments ?? []).map((e) => e.id).filter(Boolean);
+
+  if (!enrollmentIds.length) {
+    return [];
+  }
+
+  const { data: payments, error: paymentError } = await adminClient
+    .from('payments')
+    .select(
+      'id, amount, status, paid_at, due_date, installment_no, enrollment_id, created_at'
+    )
+    .in('enrollment_id', enrollmentIds)
+    .order('created_at', { ascending: false });
+
+  if (paymentError) {
+    console.warn('School payments query failed:', paymentError.message);
+    return [];
+  }
+
+  return payments ?? [];
+}
+
+async function getSchoolOverview(schoolId) {
+  const { data: school, error: schoolError } = await adminClient
+    .from('schools')
+    .select('*')
+    .eq('id', schoolId)
+    .maybeSingle();
+
+  if (schoolError) {
+    throw new Error(schoolError.message);
+  }
+
+  if (!school) {
+    const err = new Error('School not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const [schoolAdmins, teachers, students, enrollments, payments] =
+    await Promise.all([
+      getProfilesByRole('school_admin', schoolId),
+      getProfilesByRole('teacher', schoolId),
+      getProfilesByRole('student', schoolId),
+      getSchoolEnrollments(schoolId),
+      getSchoolPayments(schoolId),
+    ]);
+
+  const teacherMap = new Map(teachers.map((teacher) => [teacher.id, teacher]));
+
+  const enrollmentsByStudent = new Map(
+    enrollments.map((enrollment) => [enrollment.student_id, enrollment])
+  );
+
+  const studentsWithEnrollment = students.map((student) => {
+    const enrollment = enrollmentsByStudent.get(student.id);
+
+    const teacher = enrollment?.teacher_id
+      ? teacherMap.get(enrollment.teacher_id)
+      : null;
+
+    return {
+      ...student,
+      enrollment_id: enrollment?.id ?? null,
+      plan: enrollment?.plan ?? null,
+      plan_tier: enrollment?.plan_tier ?? null,
+      plan_duration: enrollment?.plan_duration ?? null,
+      amount: enrollment?.amount ?? null,
+      payment_mode: enrollment?.payment_mode ?? null,
+      payment_type: enrollment?.payment_type ?? null,
+      payment_status: enrollment?.payment_status ?? null,
+      teacher_id: enrollment?.teacher_id ?? null,
+      teacher_name: teacher?.full_name ?? '—',
+      enrolled_at: enrollment?.enrolled_at ?? enrollment?.created_at ?? null,
+    };
+  });
+
+  const teacherStudentCounts = new Map();
+
+  for (const enrollment of enrollments) {
+    if (!enrollment.teacher_id) continue;
+
+    teacherStudentCounts.set(
+      enrollment.teacher_id,
+      (teacherStudentCounts.get(enrollment.teacher_id) ?? 0) + 1
+    );
+  }
+
+  const teachersWithCounts = teachers.map((teacher) => ({
+    ...teacher,
+    student_count: teacherStudentCounts.get(teacher.id) ?? 0,
+  }));
+
+  const paidPayments = payments.filter((payment) => payment.status === 'paid');
+  const pendingPayments = payments.filter(
+    (payment) => payment.status !== 'paid'
+  );
+
+  return {
+    school,
+    school_admins: schoolAdmins,
+    school_admin: schoolAdmins[0] ?? null,
+    teachers: teachersWithCounts,
+    students: studentsWithEnrollment,
+    enrollments,
+    paymentsSummary: {
+      paid: sumAmount(paidPayments),
+      pending: sumAmount(pendingPayments),
+      total: sumAmount(payments),
+      count: payments.length,
+    },
+    counts: {
+      schoolAdmins: schoolAdmins.length,
+      teachers: teachers.length,
+      students: students.length,
+      enrollments: enrollments.length,
+      paidStudents: enrollments.filter((e) => e.payment_status === 'paid')
+        .length,
+      partialStudents: enrollments.filter((e) => e.payment_status === 'partial')
+        .length,
+    },
+    planDist: countPlanDistribution(enrollments),
   };
 }
 
 async function getEnrollmentsForDashboard() {
-  // First try with new proper columns.
   const withNewColumns = await adminClient
     .from('enrollments')
-    .select(`
+    .select(
+      `
       id,
       student_id,
       school_id,
@@ -67,7 +302,8 @@ async function getEnrollmentsForDashboard() {
       payment_status,
       enrolled_at,
       created_at
-    `)
+    `
+    )
     .order('enrolled_at', { ascending: false });
 
   if (!withNewColumns.error) {
@@ -79,10 +315,10 @@ async function getEnrollmentsForDashboard() {
     withNewColumns.error.message
   );
 
-  // Fallback for old DB schema without plan_tier/plan_duration.
   const fallback = await adminClient
     .from('enrollments')
-    .select(`
+    .select(
+      `
       id,
       student_id,
       school_id,
@@ -92,7 +328,8 @@ async function getEnrollmentsForDashboard() {
       payment_status,
       enrolled_at,
       created_at
-    `)
+    `
+    )
     .order('enrolled_at', { ascending: false });
 
   if (fallback.error) {
@@ -105,7 +342,9 @@ async function getEnrollmentsForDashboard() {
 async function getPaymentsForDashboard() {
   const { data, error } = await adminClient
     .from('payments')
-    .select('id, amount, status, paid_at, due_date, enrollment_id, installment_no, created_at')
+    .select(
+      'id, amount, status, paid_at, due_date, enrollment_id, installment_no, created_at'
+    )
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -129,13 +368,17 @@ router.get(
       payments,
       sessionCountResp,
     ] = await Promise.all([
-      adminClient
-        .from('schools')
-        .select('id', { count: 'exact', head: true }),
+      adminClient.from('schools').select('id', {
+        count: 'exact',
+        head: true,
+      }),
 
       adminClient
         .from('user_roles')
-        .select('id', { count: 'exact', head: true })
+        .select('id', {
+          count: 'exact',
+          head: true,
+        })
         .eq('role', 'student'),
 
       adminClient
@@ -148,9 +391,10 @@ router.get(
 
       getPaymentsForDashboard(),
 
-      adminClient
-        .from('sessions')
-        .select('id', { count: 'exact', head: true }),
+      adminClient.from('sessions').select('id', {
+        count: 'exact',
+        head: true,
+      }),
     ]);
 
     if (schoolCountResp.error) {
@@ -172,25 +416,21 @@ router.get(
       );
     }
 
-    const activeEnrollments = enrollments.filter((item) => {
-      if (item.status) return item.status === 'active';
-      return true;
-    });
-
     const paidPayments = payments.filter((item) => item.status === 'paid');
     const pendingPayments = payments.filter((item) => item.status !== 'paid');
-
-    const revenue = sumAmount(paidPayments);
-    const pendingAmount = sumAmount(pendingPayments);
 
     const recentEnrollments = enrollments.slice(0, 5);
 
     const studentIds = [
-      ...new Set(recentEnrollments.map((item) => item.student_id).filter(Boolean)),
+      ...new Set(
+        recentEnrollments.map((item) => item.student_id).filter(Boolean)
+      ),
     ];
 
     const schoolIds = [
-      ...new Set(recentEnrollments.map((item) => item.school_id).filter(Boolean)),
+      ...new Set(
+        recentEnrollments.map((item) => item.school_id).filter(Boolean)
+      ),
     ];
 
     const [studentProfilesResp, recentSchoolsResp] = await Promise.all([
@@ -202,10 +442,7 @@ router.get(
         : { data: [], error: null },
 
       schoolIds.length
-        ? adminClient
-            .from('schools')
-            .select('id, name')
-            .in('id', schoolIds)
+        ? adminClient.from('schools').select('id, name').in('id', schoolIds)
         : { data: [], error: null },
     ]);
 
@@ -243,9 +480,9 @@ router.get(
       stats: {
         schools: schoolCountResp.count ?? 0,
         students: studentRoleCountResp.count ?? 0,
-        active: activeEnrollments.length,
-        revenue,
-        pendingAmount,
+        active: enrollments.length,
+        revenue: sumAmount(paidPayments),
+        pendingAmount: sumAmount(pendingPayments),
         sessions: sessionCountResp.count ?? 0,
       },
       recent,
@@ -260,14 +497,48 @@ router.get(
   asyncHandler(async (req, res) => {
     await assertCompanyAdmin(req);
 
-    const { data, error } = await adminClient
+    const { data: schools, error } = await adminClient
       .from('schools')
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
-    res.json(data ?? []);
+    const [teachers, students] = await Promise.all([
+      getProfilesByRole('teacher'),
+      getProfilesByRole('student'),
+    ]);
+
+    const teacherCountBySchool = new Map();
+    const studentCountBySchool = new Map();
+
+    for (const teacher of teachers) {
+      if (!teacher.school_id) continue;
+
+      teacherCountBySchool.set(
+        teacher.school_id,
+        (teacherCountBySchool.get(teacher.school_id) ?? 0) + 1
+      );
+    }
+
+    for (const student of students) {
+      if (!student.school_id) continue;
+
+      studentCountBySchool.set(
+        student.school_id,
+        (studentCountBySchool.get(student.school_id) ?? 0) + 1
+      );
+    }
+
+    res.json(
+      (schools ?? []).map((school) => ({
+        ...school,
+        teacher_count: teacherCountBySchool.get(school.id) ?? 0,
+        student_count: studentCountBySchool.get(school.id) ?? 0,
+      }))
+    );
   })
 );
 
@@ -282,9 +553,22 @@ router.post(
       .select()
       .single();
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
     res.status(201).json(data);
+  })
+);
+
+router.get(
+  '/schools/:schoolId/overview',
+  asyncHandler(async (req, res) => {
+    await assertCompanyAdmin(req);
+
+    const overview = await getSchoolOverview(req.params.schoolId);
+
+    res.json(overview);
   })
 );
 
@@ -309,10 +593,14 @@ router.get(
 
     const { data: payments, error } = await adminClient
       .from('payments')
-      .select('id, amount, status, paid_at, due_date, installment_no, enrollment_id, created_at')
+      .select(
+        'id, amount, status, paid_at, due_date, installment_no, enrollment_id, created_at'
+      )
       .order('created_at', { ascending: false });
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
     const enrollIds = [
       ...new Set((payments ?? []).map((p) => p.enrollment_id).filter(Boolean)),
@@ -328,10 +616,12 @@ router.get(
 
     const { data: enrolls, error: eErr } = await adminClient
       .from('enrollments')
-      .select('id, plan, student_id, school_id')
+      .select('id, plan, plan_tier, student_id, school_id')
       .in('id', enrollIds);
 
-    if (eErr) throw new Error(eErr.message);
+    if (eErr) {
+      throw new Error(eErr.message);
+    }
 
     const eMap = new Map((enrolls ?? []).map((e) => [e.id, e]));
 
@@ -356,8 +646,13 @@ router.get(
           .in('id', schoolIds.length ? schoolIds : [emptyUuid()]),
       ]);
 
-    if (pErr) throw new Error(pErr.message);
-    if (sErr) throw new Error(sErr.message);
+    if (pErr) {
+      throw new Error(pErr.message);
+    }
+
+    if (sErr) {
+      throw new Error(sErr.message);
+    }
 
     const pMap = new Map((profs ?? []).map((p) => [p.id, p.full_name]));
     const sMap = new Map((schools ?? []).map((s) => [s.id, s.name]));
@@ -367,7 +662,7 @@ router.get(
 
       return {
         ...payment,
-        plan: enrollment?.plan ?? '—',
+        plan: enrollment?.plan_tier ?? enrollment?.plan ?? '—',
         student: pMap.get(enrollment?.student_id) ?? '—',
         school: sMap.get(enrollment?.school_id) ?? '—',
       };
@@ -394,34 +689,24 @@ router.get(
   asyncHandler(async (req, res) => {
     await assertCompanyAdmin(req);
 
-    const { data: roles, error } = await adminClient
-      .from('user_roles')
-      .select('user_id, school_id')
-      .eq('role', 'student');
+    const students = await getProfilesByRole('student');
 
-    if (error) throw new Error(error.message);
+    const schoolIds = [
+      ...new Set(students.map((student) => student.school_id).filter(Boolean)),
+    ];
 
-    const ids = (roles ?? []).map((r) => r.user_id);
+    const { data: schools, error: schoolError } = schoolIds.length
+      ? await adminClient.from('schools').select('id, name').in('id', schoolIds)
+      : { data: [], error: null };
 
-    if (!ids.length) return res.json([]);
-
-    const [{ data: profs, error: pErr }, { data: schools, error: sErr }] =
-      await Promise.all([
-        adminClient
-          .from('profiles')
-          .select('id, full_name, email, class_assigned, school_id, parent_phone')
-          .in('id', ids),
-
-        adminClient.from('schools').select('id, name'),
-      ]);
-
-    if (pErr) throw new Error(pErr.message);
-    if (sErr) throw new Error(sErr.message);
+    if (schoolError) {
+      throw new Error(schoolError.message);
+    }
 
     const sMap = new Map((schools ?? []).map((s) => [s.id, s.name]));
 
     res.json(
-      (profs ?? []).map((profile) => ({
+      students.map((profile) => ({
         ...profile,
         school_name: sMap.get(profile.school_id) ?? '—',
       }))
@@ -434,34 +719,24 @@ router.get(
   asyncHandler(async (req, res) => {
     await assertCompanyAdmin(req);
 
-    const { data: roles, error } = await adminClient
-      .from('user_roles')
-      .select('user_id, school_id')
-      .eq('role', 'teacher');
+    const teachers = await getProfilesByRole('teacher');
 
-    if (error) throw new Error(error.message);
+    const schoolIds = [
+      ...new Set(students.map((teacher) => teacher.school_id).filter(Boolean)),
+    ];
 
-    const ids = (roles ?? []).map((r) => r.user_id);
+    const { data: schools, error: schoolError } = schoolIds.length
+      ? await adminClient.from('schools').select('id, name').in('id', schoolIds)
+      : { data: [], error: null };
 
-    if (!ids.length) return res.json([]);
-
-    const [{ data: profs, error: pErr }, { data: schools, error: sErr }] =
-      await Promise.all([
-        adminClient
-          .from('profiles')
-          .select('id, full_name, email, class_assigned, school_id, phone')
-          .in('id', ids),
-
-        adminClient.from('schools').select('id, name'),
-      ]);
-
-    if (pErr) throw new Error(pErr.message);
-    if (sErr) throw new Error(sErr.message);
+    if (schoolError) {
+      throw new Error(schoolError.message);
+    }
 
     const sMap = new Map((schools ?? []).map((s) => [s.id, s.name]));
 
     res.json(
-      (profs ?? []).map((profile) => ({
+      teachers.map((profile) => ({
         ...profile,
         school_name: sMap.get(profile.school_id) ?? '—',
       }))
@@ -479,7 +754,9 @@ router.get(
       .select('id, name')
       .order('name');
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
     res.json(data ?? []);
   })
@@ -495,17 +772,21 @@ router.get(
       .select('*')
       .order('scheduled_at', { ascending: false });
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
-    const sIds = [
+    const schoolIds = [
       ...new Set((data ?? []).map((s) => s.target_school_id).filter(Boolean)),
     ];
 
-    const { data: schoolsData, error: sErr } = sIds.length
-      ? await adminClient.from('schools').select('id, name').in('id', sIds)
+    const { data: schoolsData, error: schoolError } = schoolIds.length
+      ? await adminClient.from('schools').select('id, name').in('id', schoolIds)
       : { data: [], error: null };
 
-    if (sErr) throw new Error(sErr.message);
+    if (schoolError) {
+      throw new Error(schoolError.message);
+    }
 
     const sMap = new Map((schoolsData ?? []).map((s) => [s.id, s.name]));
 
@@ -541,7 +822,9 @@ router.post(
           upsert: false,
         });
 
-      if (error) throw new Error(error.message);
+      if (error) {
+        throw new Error(error.message);
+      }
 
       recording_url = path;
     }
@@ -561,7 +844,9 @@ router.post(
       .select()
       .single();
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
     res.status(201).json(data);
   })
@@ -584,11 +869,35 @@ router.get(
       .from('session-recordings')
       .createSignedUrl(path, 3600);
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
     res.json({
       signedUrl: data.signedUrl,
     });
+  })
+);
+
+router.get(
+  '/claims',
+  asyncHandler(async (req, res) => {
+    await assertCompanyAdmin(req);
+
+    const claims = await listAllClaimsForCompany();
+
+    res.json(claims);
+  })
+);
+
+router.patch(
+  '/claims/:claimId/status',
+  asyncHandler(async (req, res) => {
+    await assertCompanyAdmin(req);
+
+    const claim = await updateClaimStatus(req.params.claimId, req.body.status);
+
+    res.json(claim);
   })
 );
 

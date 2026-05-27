@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { asyncHandler } from '../utils.js';
 import { adminClient } from '../supabase.js';
-
+import {
+  raiseStudentClaim,
+  listClaimsForStudent,
+} from './claims.js';
 const router = Router();
 
 router.get('/dashboard', asyncHandler(async (req, res) => {
@@ -38,5 +41,21 @@ router.get('/dashboard', asyncHandler(async (req, res) => {
 
   res.json({ profile, enrollment, reports: reports ?? [], sessions: visibleSessions, benefits });
 }));
+
+router.get(
+  '/claims',
+  asyncHandler(async (req, res) => {
+    const claims = await listClaimsForStudent(req.user.id);
+    res.json(claims);
+  })
+);
+
+router.post(
+  '/claims',
+  asyncHandler(async (req, res) => {
+    const claim = await raiseStudentClaim(req.user.id, req.body);
+    res.status(201).json(claim);
+  })
+);
 
 export default router;

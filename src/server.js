@@ -15,11 +15,16 @@ const app = express();
 const allowedOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:5173').split(',').map((v) => v.trim());
 
 app.use(helmet());
+// app.use(cors({
+//   origin(origin, cb) {
+//     if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+//     cb(new Error(`CORS blocked for origin ${origin}`));
+//   },
+//   credentials: true,
+// }));
+
 app.use(cors({
-  origin(origin, cb) {
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS blocked for origin ${origin}`));
-  },
+  origin: true,
   credentials: true,
 }));
 app.use(express.json({ limit: '2mb' }));

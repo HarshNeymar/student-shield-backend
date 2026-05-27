@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils.js';
 import { adminClient } from '../supabase.js';
 import { createTeacher, getCallerRoles } from '../services/userProvisioning.js';
+import { listClaimsForSchoolAdmin, raiseSchoolAdminClaim } from './claims.js';
 
 const router = Router();
 
@@ -129,5 +130,22 @@ router.get('/payments', asyncHandler(async (req, res) => {
   const pending = payments.filter((p) => p.status === 'pending').reduce((s, p) => s + Number(p.amount), 0);
   res.json({ enrollments: enrolls ?? [], payments, paid, pending });
 }));
+
+
+router.get(
+  '/claims',
+  asyncHandler(async (req, res) => {
+    const claims = await listClaimsForSchoolAdmin(req.user.id);
+    res.json(claims);
+  })
+);
+
+router.post(
+  '/claims',
+  asyncHandler(async (req, res) => {
+    const claim = await raiseSchoolAdminClaim(req.user.id, req.body);
+    res.status(201).json(claim);
+  })
+);
 
 export default router;

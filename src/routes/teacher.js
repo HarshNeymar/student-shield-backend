@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils.js';
 import { adminClient } from '../supabase.js';
 import { createStudent } from '../services/userProvisioning.js';
+import { listClaimsForTeacher, raiseTeacherClaim } from './claims.js';
 
 const router = Router();
 
@@ -285,6 +286,22 @@ router.post(
       ticket: data,
       message: 'Your message has been submitted to support.',
     });
+  })
+);
+
+router.get(
+  '/claims',
+  asyncHandler(async (req, res) => {
+    const claims = await listClaimsForTeacher(req.user.id);
+    res.json(claims);
+  })
+);
+
+router.post(
+  '/claims',
+  asyncHandler(async (req, res) => {
+    const claim = await raiseTeacherClaim(req.user.id, req.body);
+    res.status(201).json(claim);
   })
 );
 
