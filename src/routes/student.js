@@ -5,8 +5,15 @@ import {
   raiseStudentClaim,
   listClaimsForStudent,
 } from './claims.js';
+import multer from 'multer';
 const router = Router();
-
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 5,
+  },
+});
 router.get('/dashboard', asyncHandler(async (req, res) => {
   const userId = req.user.id;
   const { data: profile, error: pErr } = await req.supabase
@@ -52,8 +59,14 @@ router.get(
 
 router.post(
   '/claims',
+  upload.array('documents', 5),
   asyncHandler(async (req, res) => {
-    const claim = await raiseStudentClaim(req.user.id, req.body);
+    const claim = await raiseStudentClaim(
+      req.user.id,
+      req.body,
+      req.files ?? []
+    );
+
     res.status(201).json(claim);
   })
 );

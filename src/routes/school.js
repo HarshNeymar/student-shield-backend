@@ -3,9 +3,16 @@ import { asyncHandler } from '../utils.js';
 import { adminClient } from '../supabase.js';
 import { createTeacher, getCallerRoles } from '../services/userProvisioning.js';
 import { listClaimsForSchoolAdmin, raiseSchoolAdminClaim } from './claims.js';
-
+import { createStudent } from '../services/userProvisioning.js';
+import multer from 'multer';
 const router = Router();
-
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 5,
+  },
+});
 
 async function assertCanAccessSchool(req, schoolId) {
   const roles = await getCallerRoles(req.user.id);
@@ -16,7 +23,15 @@ async function assertCanAccessSchool(req, schoolId) {
     throw err;
   }
 }
+function getPlanLabel(plan) {
+  const labels = {
+    basic: 'Basic Plan',
+    standard: 'Standard Plan',
+    premium: 'Premium Plan',
+  };
 
+  return labels[plan] ?? 'Basic Plan';
+}
 function countBy(rows, keyFn) {
   return rows.reduce((acc, row) => {
     const key = keyFn(row) || 'Unassigned';
@@ -142,9 +157,75 @@ router.get(
 
 router.post(
   '/claims',
+  upload.array('documents', 5),
   asyncHandler(async (req, res) => {
-    const claim = await raiseSchoolAdminClaim(req.user.id, req.body);
+    const claim = await raiseSchoolAdminClaim(
+      req.user.id,
+      req.body,
+      req.files ?? []
+    );
+
     res.status(201).json(claim);
+  })
+);
+
+router.post(
+  '/students',
+  asyncHandler(async (req, res) => {
+    const result = await createStudent(req.user.id, req.body);
+    res.status(201).json(result);
+  })
+);
+
+router.get(
+  '/plan',
+  asyncHandler(async (req, res) => {
+    const { data: profile, error: profileError } = await adminClient
+      .from('profiles')
+      .select('school_id')
+      .eq('id', req.user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      throw new Error(profileError.message);
+    }
+
+    if (!profile?.school_id) {
+      return res.status(400).json({
+        error: 'School assignment missing',
+      });
+    }
+
+    const { data: school, error: schoolError } = await adminClient
+      .from('schools')
+      .select('id, name, selected_plan_tier')
+      .eq('id', profile.school_id)
+      .maybeSingle();
+
+    if (schoolError) {
+      throw new Error(schoolError.message);
+    }
+
+    if (!school) {
+      return res.status(404).json({
+        error: 'School not found',
+      });
+    }
+
+    const selectedPlan = school.selected_plan_tier ?? 'basic';
+
+    const planLabels = {
+      basic: 'Basic Plan',
+      standard: 'Standard Plan',
+      premium: 'Premium Plan',
+    };
+
+    res.json({
+      school_id: school.id,
+      school_name: school.name,
+      selected_plan_tier: selectedPlan,
+      plan_name: planLabels[selectedPlan] ?? 'Basic Plan',
+    });
   })
 );
 

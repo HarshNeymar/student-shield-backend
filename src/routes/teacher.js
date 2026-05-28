@@ -1,11 +1,18 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { asyncHandler } from '../utils.js';
 import { adminClient } from '../supabase.js';
 import { createStudent } from '../services/userProvisioning.js';
 import { listClaimsForTeacher, raiseTeacherClaim } from './claims.js';
 
 const router = Router();
-
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 5,
+  },
+});
 async function getTeacherProfile(userId) {
   const { data, error } = await adminClient
     .from('profiles')
@@ -134,59 +141,6 @@ router.post(
 );
 
 router.get(
-  '/claims',
-  asyncHandler(async (req, res) => {
-    const { data, error } = await adminClient
-      .from('claims')
-      .select('*')
-      .eq('teacher_id', req.user.id)
-      .order('created_at', { ascending: false });
-
-    if (error) throw new Error(error.message);
-
-    res.json(data ?? []);
-  })
-);
-
-router.post(
-  '/claims',
-  asyncHandler(async (req, res) => {
-    const profile = await getTeacherProfile(req.user.id);
-
-    if (!profile?.school_id) {
-      return res.status(400).json({ error: 'Missing school assignment' });
-    }
-
-    const title = String(req.body.title ?? '').trim();
-    const description = String(req.body.description ?? '').trim();
-    const amount = Number(req.body.amount ?? 0);
-
-    if (!title || !description) {
-      return res.status(400).json({
-        error: 'Title and description are required',
-      });
-    }
-
-    const { data, error } = await adminClient
-      .from('claims')
-      .insert({
-        teacher_id: req.user.id,
-        school_id: profile.school_id,
-        title,
-        description,
-        amount,
-        status: 'pending',
-      })
-      .select()
-      .single();
-
-    if (error) throw new Error(error.message);
-
-    res.status(201).json(data);
-  })
-);
-
-router.get(
   '/wellness/students',
   asyncHandler(async (req, res) => {
     const students = await getTeacherStudents(req.user.id);
@@ -299,10 +253,61 @@ router.get(
 
 router.post(
   '/claims',
+  upload.array('documents', 5),
   asyncHandler(async (req, res) => {
-    const claim = await raiseTeacherClaim(req.user.id, req.body);
+    console.log('CLAIM BODY:', req.body);
+    console.log('CLAIM FILES:', req.files?.length ?? 0);
+
+    const claim = await raiseTeacherClaim(
+      req.user.id,
+      req.body,
+      req.files ?? []
+    );
+
     res.status(201).json(claim);
   })
 );
 
+router.get(
+  '/plan',
+  asyncHandler(async (req, res) => {
+    const { data: profile, error: profileError } = await adminClient
+      .from('profiles')
+      .select('school_id')
+      .eq('id', req.user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      throw new Error(profileError.message);
+    }
+
+    if (!profile?.school_id) {
+      return res.status(400).json({
+        error: 'School assignment missing',
+      });
+    }
+
+    const { data: school, error: schoolError } = await adminClient
+      .from('schools')
+      .select('id, name, selected_plan_tier')
+      .eq('id', profile.school_id)
+      .maybeSingle();
+
+    if (schoolError) {
+      throw new Error(schoolError.message);
+    }
+
+    if (!school) {
+      return res.status(404).json({
+        error: 'School not found',
+      });
+    }
+
+    res.json({
+      school_id: school.id,
+      school_name: school.name,
+      selected_plan_tier: school.selected_plan_tier ?? 'basic',
+    });
+  })
+);
 export default router;

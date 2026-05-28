@@ -901,4 +901,37 @@ router.patch(
   })
 );
 
+
+router.put(
+  '/schools/:schoolId/plan',
+  asyncHandler(async (req, res) => {
+    await assertCompanyAdmin(req);
+
+    const selectedPlan = String(req.body.selected_plan_tier ?? '').trim();
+
+    const allowedPlans = ['basic', 'standard', 'premium'];
+
+    if (!allowedPlans.includes(selectedPlan)) {
+      return res.status(400).json({
+        error: 'Invalid plan. Allowed values are basic, standard, premium',
+      });
+    }
+
+    const { data, error } = await adminClient
+      .from('schools')
+      .update({
+        selected_plan_tier: selectedPlan,
+      })
+      .eq('id', req.params.schoolId)
+      .select('id, name, selected_plan_tier')
+      .single();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    res.json(data);
+  })
+);
+
 export default router;

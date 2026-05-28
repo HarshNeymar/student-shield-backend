@@ -1,5 +1,4 @@
 import { adminClient } from '../supabase.js';
-import { getCallerRoles } from '../services/userProvisioning.js';
 
 async function getProfile(userId) {
   const { data, error } = await adminClient
@@ -69,7 +68,114 @@ async function verifySchoolAdminCanRaiseForStudent(schoolAdminId, studentId) {
   return { adminProfile, studentProfile };
 }
 
-export async function raiseClaim({ callerId, studentId, body, raisedByRole }) {
+function safeFileName(fileName = 'document') {
+  return String(fileName)
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_');
+}
+
+async function uploadClaimDocuments({ claimId, studentId, uploadedBy, files = [] }) {
+  if (!files.length) return [];
+
+  const uploadedRows = [];
+
+  for (const file of files) {
+    const fileName = safeFileName(file.originalname);
+    const path = `${studentId}/${claimId}/${Date.now()}-${fileName}`;
+
+    const { error: uploadError } = await adminClient.storage
+      .from('claim-documents')
+      .upload(path, file.buffer, {
+        contentType: file.mimetype,
+        upsert: false,
+      });
+
+    if (uploadError) {
+      throw new Error(uploadError.message);
+    }
+
+    const { data, error } = await adminClient
+      .from('claim_documents')
+      .insert({
+        claim_id: claimId,
+        file_name: file.originalname,
+        file_path: path,
+        mime_type: file.mimetype,
+        file_size: file.size,
+        uploaded_by: uploadedBy,
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    uploadedRows.push(data);
+  }
+
+  return uploadedRows;
+}
+
+async function addSignedUrlsToDocuments(documents = []) {
+  if (!documents.length) return [];
+
+  const signedDocs = [];
+
+  for (const document of documents) {
+    const { data, error } = await adminClient.storage
+      .from('claim-documents')
+      .createSignedUrl(document.file_path, 60 * 30);
+
+    signedDocs.push({
+      ...document,
+      signed_url: error ? null : data?.signedUrl ?? null,
+    });
+  }
+
+  return signedDocs;
+}
+
+async function attachDocumentsToClaims(claims = []) {
+  if (!claims.length) return [];
+
+  const claimIds = claims.map((claim) => claim.id).filter(Boolean);
+
+  const { data: docs, error } = await adminClient
+    .from('claim_documents')
+    .select('*')
+    .in('claim_id', claimIds)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.warn('claim_documents lookup failed:', error.message);
+    return claims.map((claim) => ({
+      ...claim,
+      documents: [],
+    }));
+  }
+
+  const docsWithUrls = await addSignedUrlsToDocuments(docs ?? []);
+
+  const docsMap = new Map();
+
+  for (const doc of docsWithUrls) {
+    const list = docsMap.get(doc.claim_id) ?? [];
+    list.push(doc);
+    docsMap.set(doc.claim_id, list);
+  }
+
+  return claims.map((claim) => ({
+    ...claim,
+    documents: docsMap.get(claim.id) ?? [],
+  }));
+}
+
+export async function raiseClaim({
+  callerId,
+  studentId,
+  body,
+  raisedByRole,
+  files = [],
+}) {
   if (!studentId) {
     throw new Error('Student is required');
   }
@@ -96,7 +202,9 @@ export async function raiseClaim({ callerId, studentId, body, raisedByRole }) {
   }
 
   const title = String(body.title ?? body.claim_title ?? '').trim();
-  const description = String(body.description ?? body.claim_description ?? '').trim();
+  const description = String(
+    body.description ?? body.claim_description ?? ''
+  ).trim();
   const claimReason = String(body.claim_reason ?? body.reason ?? '').trim();
   const amount = Number(body.amount ?? 0);
 
@@ -108,11 +216,12 @@ export async function raiseClaim({ callerId, studentId, body, raisedByRole }) {
     throw new Error('Invalid claim amount');
   }
 
-  const { data, error } = await adminClient
+  const { data: claim, error } = await adminClient
     .from('claims')
     .insert({
       student_id: studentId,
-      teacher_id: raisedByRole === 'teacher' ? callerId : body.teacher_id ?? null,
+      teacher_id:
+        raisedByRole === 'teacher' ? callerId : body.teacher_id ?? null,
       school_id: studentProfile.school_id,
       raised_by_user_id: callerId,
       raised_by_role: raisedByRole,
@@ -139,19 +248,30 @@ export async function raiseClaim({ callerId, studentId, body, raisedByRole }) {
     throw new Error(error.message);
   }
 
-  return data;
+  const documents = await uploadClaimDocuments({
+    claimId: claim.id,
+    studentId,
+    uploadedBy: callerId,
+    files,
+  });
+
+  return {
+    ...claim,
+    documents: await addSignedUrlsToDocuments(documents),
+  };
 }
 
-export async function raiseStudentClaim(callerId, body) {
+export async function raiseStudentClaim(callerId, body, files = []) {
   return raiseClaim({
     callerId,
     studentId: callerId,
     body,
     raisedByRole: 'student',
+    files,
   });
 }
 
-export async function raiseTeacherClaim(callerId, body) {
+export async function raiseTeacherClaim(callerId, body, files = []) {
   const studentId = body.student_id;
 
   await verifyTeacherCanRaiseForStudent(callerId, studentId);
@@ -161,10 +281,11 @@ export async function raiseTeacherClaim(callerId, body) {
     studentId,
     body,
     raisedByRole: 'teacher',
+    files,
   });
 }
 
-export async function raiseSchoolAdminClaim(callerId, body) {
+export async function raiseSchoolAdminClaim(callerId, body, files = []) {
   const studentId = body.student_id;
 
   await verifySchoolAdminCanRaiseForStudent(callerId, studentId);
@@ -174,6 +295,7 @@ export async function raiseSchoolAdminClaim(callerId, body) {
     studentId,
     body,
     raisedByRole: 'school_admin',
+    files,
   });
 }
 
@@ -186,7 +308,7 @@ export async function listClaimsForStudent(studentId) {
 
   if (error) throw new Error(error.message);
 
-  return data ?? [];
+  return attachDocumentsToClaims(data ?? []);
 }
 
 export async function listClaimsForTeacher(teacherId) {
@@ -197,7 +319,9 @@ export async function listClaimsForTeacher(teacherId) {
 
   if (enrollmentError) throw new Error(enrollmentError.message);
 
-  const studentIds = (enrollments ?? []).map((e) => e.student_id).filter(Boolean);
+  const studentIds = (enrollments ?? [])
+    .map((e) => e.student_id)
+    .filter(Boolean);
 
   if (!studentIds.length) return [];
 
@@ -209,7 +333,7 @@ export async function listClaimsForTeacher(teacherId) {
 
   if (error) throw new Error(error.message);
 
-  return data ?? [];
+  return attachDocumentsToClaims(data ?? []);
 }
 
 export async function listClaimsForSchoolAdmin(schoolAdminId) {
@@ -227,7 +351,7 @@ export async function listClaimsForSchoolAdmin(schoolAdminId) {
 
   if (error) throw new Error(error.message);
 
-  return data ?? [];
+  return attachDocumentsToClaims(data ?? []);
 }
 
 export async function listAllClaimsForCompany() {
@@ -286,12 +410,14 @@ export async function listAllClaimsForCompany() {
     (raisedByResp.data ?? []).map((profile) => [profile.id, profile])
   );
 
-  return (claims ?? []).map((claim) => ({
+  const claimsWithRelations = (claims ?? []).map((claim) => ({
     ...claim,
     student: studentMap.get(claim.student_id) ?? null,
     school: schoolMap.get(claim.school_id) ?? null,
     raised_by: raisedByMap.get(claim.raised_by_user_id) ?? null,
   }));
+
+  return attachDocumentsToClaims(claimsWithRelations);
 }
 
 export async function updateClaimStatus(claimId, status) {

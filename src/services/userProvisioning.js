@@ -346,11 +346,21 @@ export async function createStudent(callerId, body) {
     throw new Error('Missing required fields');
   }
 
-  const isTeacher = roles.some((r) => r.role === 'teacher');
+const isTeacher = roles.some((r) => r.role === 'teacher');
+const isSchoolAdmin = roles.some((r) => r.role === 'school_admin');
+const isCompanyAdmin = roles.some((r) => r.role === 'company_admin');
 
-  const classAssigned = isTeacher
-    ? teacherProfile.class_assigned
-    : body.class_assigned;
+const classAssigned = isTeacher
+  ? teacherProfile.class_assigned
+  : body.class_assigned;
+
+if (isTeacher && !teacherProfile.class_assigned) {
+  throw new Error('Teacher assigned class is missing');
+}
+
+if ((isSchoolAdmin || isCompanyAdmin) && !body.class_assigned) {
+  throw new Error('Class is required');
+}
 
   if (!classAssigned) {
     throw new Error('Assigned class is required');
@@ -448,7 +458,7 @@ export async function createStudent(callerId, body) {
     .insert({
       student_id: studentId,
       school_id: teacherProfile.school_id,
-      teacher_id: callerId,
+      teacher_id: isTeacher ? callerId : body.teacher_id ?? null,
 
       // Existing DB enum column: monthly / quarterly / half_yearly / yearly
       plan: planDuration,
