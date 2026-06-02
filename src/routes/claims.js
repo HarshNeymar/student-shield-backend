@@ -441,3 +441,69 @@ export async function updateClaimStatus(claimId, status) {
 
   return data;
 }
+
+export async function listClaimsRaisedByUser(userId) {
+  const { data: claims, error } = await adminClient
+    .from('claims')
+    .select('*')
+    .eq('raised_by_user_id', userId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const rows = claims ?? [];
+
+  if (!rows.length) {
+    return [];
+  }
+
+  const studentIds = [
+    ...new Set(rows.map((claim) => claim.student_id).filter(Boolean)),
+  ];
+
+  const schoolIds = [
+    ...new Set(rows.map((claim) => claim.school_id).filter(Boolean)),
+  ];
+
+  const [studentsResp, schoolsResp] = await Promise.all([
+    studentIds.length
+      ? adminClient
+          .from('profiles')
+          .select('id, full_name, email, class_assigned, parent_phone')
+          .in('id', studentIds)
+      : { data: [], error: null },
+
+    schoolIds.length
+      ? adminClient
+          .from('schools')
+          .select('id, name')
+          .in('id', schoolIds)
+      : { data: [], error: null },
+  ]);
+
+  if (studentsResp.error) {
+    throw new Error(studentsResp.error.message);
+  }
+
+  if (schoolsResp.error) {
+    throw new Error(schoolsResp.error.message);
+  }
+
+  const studentMap = new Map(
+    (studentsResp.data ?? []).map((student) => [student.id, student])
+  );
+
+  const schoolMap = new Map(
+    (schoolsResp.data ?? []).map((school) => [school.id, school])
+  );
+
+  const claimsWithRelations = rows.map((claim) => ({
+    ...claim,
+    student: studentMap.get(claim.student_id) ?? null,
+    school: schoolMap.get(claim.school_id) ?? null,
+  }));
+
+  return attachDocumentsToClaims(claimsWithRelations);
+}
