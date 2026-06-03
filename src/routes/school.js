@@ -40,58 +40,214 @@ function countBy(rows, keyFn) {
   }, {});
 }
 
-router.get('/dashboard', asyncHandler(async (req, res) => {
-  const schoolId = req.query.schoolId;
-  if (!schoolId) return res.status(400).json({ error: 'Missing schoolId' });
-  await assertCanAccessSchool(req, schoolId);
+router.get(
+  '/dashboard',
+  asyncHandler(async (req, res) => {
+    const schoolId = req.query.schoolId;
 
-  const [school, teacherRoles, studentRoles, enrollments, enrollIdsResp] = await Promise.all([
-    adminClient.from('schools').select('*').eq('id', schoolId).maybeSingle(),
-    adminClient.from('user_roles').select('user_id').eq('school_id', schoolId).eq('role', 'teacher'),
-    adminClient.from('user_roles').select('user_id').eq('school_id', schoolId).eq('role', 'student'),
-    adminClient.from('enrollments').select('id, amount, payment_status, plan, student_id, teacher_id').eq('school_id', schoolId),
-    adminClient.from('enrollments').select('id').eq('school_id', schoolId),
-  ]);
-  for (const r of [school, teacherRoles, studentRoles, enrollments, enrollIdsResp]) if (r.error) throw new Error(r.error.message);
+    if (!schoolId) {
+      return res.status(400).json({ error: 'Missing schoolId' });
+    }
 
-  const teacherIds = (teacherRoles.data ?? []).map((r) => r.user_id);
-  const studentIds = (studentRoles.data ?? []).map((r) => r.user_id);
-  const [teacherList, studentList] = await Promise.all([
-    teacherIds.length ? adminClient.from('profiles').select('id, full_name, email, class_assigned').in('id', teacherIds) : { data: [], error: null },
-    studentIds.length ? adminClient.from('profiles').select('id, full_name, email, class_assigned, parent_phone, age, created_by').in('id', studentIds) : { data: [], error: null },
-  ]);
-  if (teacherList.error) throw new Error(teacherList.error.message);
-  if (studentList.error) throw new Error(studentList.error.message);
+    await assertCanAccessSchool(req, schoolId);
 
-  const teacherMap = new Map((teacherList.data ?? []).map((t) => [t.id, t]));
-  const enrollByStudent = new Map((enrollments.data ?? []).map((e) => [e.student_id, e]));
-  const studentsWithTeacher = (studentList.data ?? []).map((student) => {
-    const enrollment = enrollByStudent.get(student.id);
-    const teacher = teacherMap.get(enrollment?.teacher_id ?? student.created_by);
-    return { ...student, plan: enrollment?.plan ?? null, payment_status: enrollment?.payment_status ?? null, teacher_name: teacher?.full_name ?? '—' };
-  });
+    const [
+      school,
+      teacherRoles,
+      studentRoles,
+      enrollments,
+      enrollIdsResp,
+      claimsCountResp,
+    ] = await Promise.all([
+      adminClient
+        .from('schools')
+        .select('*, selected_plan_tier')
+        .eq('id', schoolId)
+        .maybeSingle(),
 
-  const revenue = (enrollments.data ?? []).filter((e) => e.payment_status !== 'failed').reduce((s, e) => s + Number(e.amount), 0);
-  const ids = (enrollIdsResp.data ?? []).map((e) => e.id);
-  let paid = 0; let pending = 0;
-  if (ids.length) {
-    const { data, error } = await adminClient.from('payments').select('amount, status').in('enrollment_id', ids);
-    if (error) throw new Error(error.message);
-    paid = (data ?? []).filter((p) => p.status === 'paid').reduce((s, p) => s + Number(p.amount), 0);
-    pending = (data ?? []).filter((p) => p.status === 'pending').reduce((s, p) => s + Number(p.amount), 0);
-  }
+      adminClient
+        .from('user_roles')
+        .select('user_id')
+        .eq('school_id', schoolId)
+        .eq('role', 'teacher'),
 
-  res.json({
-    school: school.data,
-    stats: { teachers: teacherIds.length, students: studentIds.length, revenue },
-    teachers: teacherList.data ?? [],
-    students: studentsWithTeacher,
-    classWiseStudentCount: countBy(studentsWithTeacher, (s) => s.class_assigned),
-    planWiseStudentDistribution: countBy(enrollments.data ?? [], (e) => e.plan),
-    teacherStudentMap: countBy(studentsWithTeacher, (s) => s.teacher_name),
-    payments: { paid, pending },
-  });
-}));
+      adminClient
+        .from('user_roles')
+        .select('user_id')
+        .eq('school_id', schoolId)
+        .eq('role', 'student'),
+
+      adminClient
+        .from('enrollments')
+        .select(
+          'id, amount, payment_status, plan, plan_tier, student_id, teacher_id'
+        )
+        .eq('school_id', schoolId),
+
+      adminClient
+        .from('enrollments')
+        .select('id')
+        .eq('school_id', schoolId),
+
+      adminClient
+        .from('claims')
+        .select('id', {
+          count: 'exact',
+          head: true,
+        })
+        .eq('school_id', schoolId),
+    ]);
+
+    for (const r of [
+      school,
+      teacherRoles,
+      studentRoles,
+      enrollments,
+      enrollIdsResp,
+    ]) {
+      if (r.error) {
+        throw new Error(r.error.message);
+      }
+    }
+
+    if (claimsCountResp.error) {
+      console.warn(
+        'School dashboard claims count failed:',
+        claimsCountResp.error.message
+      );
+    }
+
+    const teacherIds = (teacherRoles.data ?? []).map((r) => r.user_id);
+    const studentIds = (studentRoles.data ?? []).map((r) => r.user_id);
+
+    const [teacherList, studentList] = await Promise.all([
+      teacherIds.length
+        ? adminClient
+            .from('profiles')
+            .select('id, full_name, email, class_assigned')
+            .in('id', teacherIds)
+        : { data: [], error: null },
+
+      studentIds.length
+        ? adminClient
+            .from('profiles')
+            .select(
+              'id, full_name, email, class_assigned, parent_phone, age, created_by'
+            )
+            .in('id', studentIds)
+        : { data: [], error: null },
+    ]);
+
+    if (teacherList.error) {
+      throw new Error(teacherList.error.message);
+    }
+
+    if (studentList.error) {
+      throw new Error(studentList.error.message);
+    }
+
+    const teacherMap = new Map(
+      (teacherList.data ?? []).map((teacher) => [teacher.id, teacher])
+    );
+
+    const enrollByStudent = new Map(
+      (enrollments.data ?? []).map((enrollment) => [
+        enrollment.student_id,
+        enrollment,
+      ])
+    );
+
+    const studentsWithTeacher = (studentList.data ?? []).map((student) => {
+      const enrollment = enrollByStudent.get(student.id);
+
+      const teacher = teacherMap.get(
+        enrollment?.teacher_id ?? student.created_by
+      );
+
+      return {
+        ...student,
+        plan: enrollment?.plan_tier ?? enrollment?.plan ?? null,
+        payment_status: enrollment?.payment_status ?? null,
+        teacher_name: teacher?.full_name ?? '—',
+      };
+    });
+
+    const revenue = (enrollments.data ?? [])
+      .filter((enrollment) => enrollment.payment_status !== 'failed')
+      .reduce((sum, enrollment) => sum + Number(enrollment.amount ?? 0), 0);
+
+    const ids = (enrollIdsResp.data ?? []).map((enrollment) => enrollment.id);
+
+    let paid = 0;
+    let pending = 0;
+
+    if (ids.length) {
+      const { data, error } = await adminClient
+        .from('payments')
+        .select('amount, status')
+        .in('enrollment_id', ids);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      paid = (data ?? [])
+        .filter((payment) => payment.status === 'paid')
+        .reduce((sum, payment) => sum + Number(payment.amount ?? 0), 0);
+
+      pending = (data ?? [])
+        .filter((payment) => payment.status === 'pending')
+        .reduce((sum, payment) => sum + Number(payment.amount ?? 0), 0);
+    }
+
+    const planLabels = {
+      basic: 'Basic Plan',
+      standard: 'Standard Plan',
+      premium: 'Premium Plan',
+    };
+
+    const selectedPlanTier = school.data?.selected_plan_tier ?? 'basic';
+
+    res.json({
+      school: school.data,
+
+      plan: {
+        tier: selectedPlanTier,
+        name: planLabels[selectedPlanTier] ?? 'Basic Plan',
+      },
+
+      stats: {
+        teachers: teacherIds.length,
+        students: studentIds.length,
+        revenue,
+        claims: claimsCountResp.count ?? 0,
+      },
+
+      teachers: teacherList.data ?? [],
+      students: studentsWithTeacher,
+
+      classWiseStudentCount: countBy(
+        studentsWithTeacher,
+        (student) => student.class_assigned
+      ),
+
+      planWiseStudentDistribution: countBy(
+        enrollments.data ?? [],
+        (enrollment) => enrollment.plan_tier ?? enrollment.plan
+      ),
+
+      teacherStudentMap: countBy(
+        studentsWithTeacher,
+        (student) => student.teacher_name
+      ),
+
+      payments: {
+        paid,
+        pending,
+      },
+    });
+  })
+);
 
 router.get('/students', asyncHandler(async (req, res) => {
   const schoolId = req.query.schoolId;

@@ -367,6 +367,7 @@ router.get(
       enrollments,
       payments,
       sessionCountResp,
+      claimsCountResp,
     ] = await Promise.all([
       adminClient.from('schools').select('id', {
         count: 'exact',
@@ -395,6 +396,11 @@ router.get(
         count: 'exact',
         head: true,
       }),
+
+      adminClient.from('claims').select('id', {
+        count: 'exact',
+        head: true,
+      }),
     ]);
 
     if (schoolCountResp.error) {
@@ -413,6 +419,13 @@ router.get(
       console.warn(
         'Company dashboard session count failed:',
         sessionCountResp.error.message
+      );
+    }
+
+    if (claimsCountResp.error) {
+      console.warn(
+        'Company dashboard claims count failed:',
+        claimsCountResp.error.message
       );
     }
 
@@ -484,6 +497,7 @@ router.get(
         revenue: sumAmount(paidPayments),
         pendingAmount: sumAmount(pendingPayments),
         sessions: sessionCountResp.count ?? 0,
+        claims: claimsCountResp.count ?? 0,
       },
       recent,
       schools: schoolsResp.data ?? [],

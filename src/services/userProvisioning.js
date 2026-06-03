@@ -32,6 +32,15 @@ const normalizePaymentType = (value) => {
     return 'installment';
   }
 
+  if (
+    type === 'paid_with_fees' ||
+    type === 'paid-with-fees' ||
+    type === 'paidwithfees' ||
+    type === 'fees'
+  ) {
+    return 'paid_with_fees';
+  }
+
   return 'one_time';
 };
 
@@ -246,10 +255,11 @@ function buildReceipt({
     premium: 'Premium Plan',
   };
 
-  const paymentTypeLabelMap = {
-    one_time: 'One-Time Payment',
-    installment: 'Installment Payment',
-  };
+const paymentTypeLabelMap = {
+  one_time: 'One-Time Payment',
+  installment: 'Installment Payment',
+  paid_with_fees: 'Paid with Fees',
+};
 
   return {
     receipt_no: receiptNo,
@@ -369,24 +379,28 @@ if ((isSchoolAdmin || isCompanyAdmin) && !body.class_assigned) {
   const planTier = normalizePlanTier(body.plan_tier ?? body.plan);
   const planDuration = 'yearly';
   const paymentType = normalizePaymentType(body.payment_type);
-  const paymentMode = normalizePaymentMode(body.payment_mode);
+  const paymentMode =
+  paymentType === 'paid_with_fees'
+    ? 'online'
+    : normalizePaymentMode(body.payment_mode);
   const amount = getPlanAmount(planTier, body.amount);
 
-  const paidAmount = Number(
-    body.paid_amount ?? (paymentType === 'installment' ? amount / 2 : amount)
-  );
+ const paidAmount = Number(
+  body.paid_amount ??
+    (paymentType === 'installment' ? amount / 2 : amount)
+);
 
-  if (!Number.isFinite(paidAmount) || paidAmount < 0) {
-    throw new Error('Invalid paid amount');
-  }
+if (!Number.isFinite(paidAmount) || paidAmount < 0) {
+  throw new Error('Invalid paid amount');
+}
 
-  const remainingAmount = Math.max(
-    0,
-    Number(body.remaining_amount ?? amount - paidAmount)
-  );
+const remainingAmount =
+  paymentType === 'installment'
+    ? Math.max(0, Number(body.remaining_amount ?? amount - paidAmount))
+    : 0;
 
-  const installmentDates =
-    paymentType === 'installment' ? body.installment_dates ?? [] : [];
+const installmentDates =
+  paymentType === 'installment' ? body.installment_dates ?? [] : [];
 
   const schoolResp = await adminClient
     .from('schools')
@@ -487,7 +501,7 @@ if ((isSchoolAdmin || isCompanyAdmin) && !body.class_assigned) {
     throw new Error(enrollmentError.message);
   }
 
-  if (paymentType === 'one_time') {
+if (paymentType === 'one_time' || paymentType === 'paid_with_fees') {
     const { error } = await adminClient.from('payments').insert({
       enrollment_id: enroll.id,
       amount: paidAmount,
