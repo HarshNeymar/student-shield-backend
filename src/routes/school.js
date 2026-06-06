@@ -249,18 +249,174 @@ router.get(
   })
 );
 
-router.get('/students', asyncHandler(async (req, res) => {
-  const schoolId = req.query.schoolId;
-  if (!schoolId) return res.status(400).json({ error: 'Missing schoolId' });
-  await assertCanAccessSchool(req, schoolId);
-  const { data: roles, error } = await adminClient.from('user_roles').select('user_id').eq('school_id', schoolId).eq('role', 'student');
-  if (error) throw new Error(error.message);
-  const ids = (roles ?? []).map((r) => r.user_id);
-  if (!ids.length) return res.json([]);
-  const { data, error: pErr } = await adminClient.from('profiles').select('id, full_name, email, class_assigned, parent_phone, age, created_by').in('id', ids);
-  if (pErr) throw new Error(pErr.message);
-  res.json(data ?? []);
-}));
+router.get(
+  '/students',
+  asyncHandler(async (req, res) => {
+    const schoolId = req.query.schoolId;
+
+    if (!schoolId) {
+      return res.status(400).json({ error: 'Missing schoolId' });
+    }
+
+    await assertCanAccessSchool(req, schoolId);
+
+    const { data: roles, error: roleError } = await adminClient
+      .from('user_roles')
+      .select('user_id')
+      .eq('school_id', schoolId)
+      .eq('role', 'student');
+
+    if (roleError) {
+      throw new Error(roleError.message);
+    }
+
+    const studentIds = (roles ?? []).map((r) => r.user_id).filter(Boolean);
+
+    if (!studentIds.length) {
+      return res.json([]);
+    }
+
+    const { data: students, error: profileError } = await adminClient
+      .from('profiles')
+      .select(
+        `
+        id,
+        full_name,
+        email,
+        class_assigned,
+        parent_phone,
+        age,
+        created_by,
+        school_id
+      `
+      )
+      .in('id', studentIds)
+      .order('full_name');
+
+    if (profileError) {
+      throw new Error(profileError.message);
+    }
+
+    const enrollmentWithNewColumns = await adminClient
+      .from('enrollments')
+      .select(
+        `
+        id,
+        student_id,
+        teacher_id,
+        school_id,
+        plan,
+        plan_tier,
+        plan_duration,
+        amount,
+        payment_mode,
+        payment_type,
+        payment_status,
+        enrolled_at,
+        expires_at,
+        created_at
+      `
+      )
+      .eq('school_id', schoolId)
+      .in('student_id', studentIds);
+
+    let enrollments = [];
+
+    if (!enrollmentWithNewColumns.error) {
+      enrollments = enrollmentWithNewColumns.data ?? [];
+    } else {
+      console.warn(
+        'School students enrollment fallback:',
+        enrollmentWithNewColumns.error.message
+      );
+
+      const fallback = await adminClient
+        .from('enrollments')
+        .select(
+          `
+          id,
+          student_id,
+          teacher_id,
+          school_id,
+          plan,
+          amount,
+          payment_status,
+          enrolled_at,
+          expires_at,
+          created_at
+        `
+        )
+        .eq('school_id', schoolId)
+        .in('student_id', studentIds);
+
+      if (fallback.error) {
+        throw new Error(fallback.error.message);
+      }
+
+      enrollments = fallback.data ?? [];
+    }
+
+    const teacherIds = [
+      ...new Set(
+        enrollments
+          .map((enrollment) => enrollment.teacher_id)
+          .filter(Boolean)
+      ),
+    ];
+
+    const { data: teachers, error: teacherError } = teacherIds.length
+      ? await adminClient
+          .from('profiles')
+          .select('id, full_name, email, class_assigned')
+          .in('id', teacherIds)
+      : { data: [], error: null };
+
+    if (teacherError) {
+      throw new Error(teacherError.message);
+    }
+
+    const teacherMap = new Map(
+      (teachers ?? []).map((teacher) => [teacher.id, teacher])
+    );
+
+    const enrollmentMap = new Map(
+      enrollments.map((enrollment) => [enrollment.student_id, enrollment])
+    );
+
+    const rows = (students ?? []).map((student) => {
+      const enrollment = enrollmentMap.get(student.id);
+      const teacher = enrollment?.teacher_id
+        ? teacherMap.get(enrollment.teacher_id)
+        : null;
+
+      return {
+        id: student.id,
+        full_name: student.full_name,
+        email: student.email,
+        class_assigned: student.class_assigned,
+        parent_phone: student.parent_phone,
+        age: student.age,
+        school_id: student.school_id,
+
+        enrollment_id: enrollment?.id ?? null,
+        teacher_id: enrollment?.teacher_id ?? null,
+        teacher_name: teacher?.full_name ?? '—',
+
+        plan: enrollment?.plan ?? null,
+        plan_tier: enrollment?.plan_tier ?? null,
+        plan_duration: enrollment?.plan_duration ?? null,
+        amount: enrollment?.amount ?? null,
+        payment_mode: enrollment?.payment_mode ?? null,
+        payment_type: enrollment?.payment_type ?? null,
+        payment_status: enrollment?.payment_status ?? null,
+        enrolled_at: enrollment?.enrolled_at ?? enrollment?.created_at ?? null,
+        expires_at: enrollment?.expires_at ?? null,
+      };
+    });
+
+    res.json(rows);
+  })
+);
 
 router.get('/teachers', asyncHandler(async (req, res) => {
   const schoolId = req.query.schoolId;
