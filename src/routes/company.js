@@ -948,4 +948,46 @@ router.put(
   })
 );
 
+router.delete(
+  '/schools/:schoolId',
+  asyncHandler(async (req, res) => {
+    await assertCompanyAdmin(req);
+
+    const schoolId = req.params.schoolId;
+
+    if (!schoolId) {
+      return res.status(400).json({
+        error: 'Missing schoolId',
+      });
+    }
+
+    const { data: school, error: schoolError } = await adminClient
+      .from('schools')
+      .select('id, name')
+      .eq('id', schoolId)
+      .maybeSingle();
+
+    if (schoolError) throw new Error(schoolError.message);
+
+    if (!school) {
+      return res.status(404).json({
+        error: 'School not found',
+      });
+    }
+
+    const { error } = await adminClient
+      .from('schools')
+      .delete()
+      .eq('id', schoolId);
+
+    if (error) throw new Error(error.message);
+
+    res.json({
+      success: true,
+      message: 'School deleted successfully',
+      deleted_school: school,
+    });
+  })
+);
+
 export default router;

@@ -87,6 +87,16 @@ async function getTeacherStudents(userId) {
   }));
 }
 
+function getPlanLabel(plan) {
+  const labels = {
+    basic: 'Basic Plan',
+    standard: 'Standard Plan',
+    premium: 'Premium Plan',
+  };
+
+  return labels[plan] ?? 'Basic Plan';
+}
+
 router.get(
   '/dashboard',
   asyncHandler(async (req, res) => {
@@ -110,8 +120,31 @@ router.get(
       if (result.error) throw new Error(result.error.message);
     }
 
+    let school = null;
+
+    if (profile?.school_id) {
+      const { data: schoolData, error: schoolError } = await adminClient
+        .from('schools')
+        .select('id, name, selected_plan_tier')
+        .eq('id', profile.school_id)
+        .maybeSingle();
+
+      if (schoolError) {
+        throw new Error(schoolError.message);
+      }
+
+      school = schoolData;
+    }
+
+    const selectedPlanTier = school?.selected_plan_tier ?? 'basic';
+
     res.json({
       profile,
+      school,
+      plan: {
+        tier: selectedPlanTier,
+        name: getPlanLabel(selectedPlanTier),
+      },
       students,
       counts: {
         students: students.length,
