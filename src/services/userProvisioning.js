@@ -691,12 +691,11 @@ export async function payPendingStudentFees(callerId, studentId) {
       teacher_id,
       amount,
       payment_status,
-      payment_type
+      payment_type,
+      created_at
     `
     )
     .eq('student_id', studentId)
-    .eq('payment_type', 'installment')
-    .eq('payment_status', 'pending')
     .order('created_at', { ascending: false })
     .limit(1);
 
@@ -716,7 +715,7 @@ export async function payPendingStudentFees(callerId, studentId) {
   }
 
   if (!enrollment) {
-    throw new Error('No pending installment found for this student');
+    throw new Error('Student enrollment not found or not allowed');
   }
 
   const { data: pendingPayment, error: pendingPaymentError } = await adminClient
@@ -728,7 +727,9 @@ export async function payPendingStudentFees(callerId, studentId) {
       amount,
       status,
       installment_no,
-      due_date
+      due_date,
+      payment_type,
+      payment_mode
     `
     )
     .eq('enrollment_id', enrollment.id)
@@ -742,7 +743,7 @@ export async function payPendingStudentFees(callerId, studentId) {
   }
 
   if (!pendingPayment) {
-    throw new Error('Pending payment row not found');
+    throw new Error('No pending payment found for this student');
   }
 
   const { data: updatedPayment, error: updatePaymentError } = await adminClient
