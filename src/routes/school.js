@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { asyncHandler } from '../utils.js';
 import { adminClient } from '../supabase.js';
-import { createTeacher, getCallerRoles } from '../services/userProvisioning.js';
+import { createTeacher, getCallerRoles, payPendingStudentFees } from '../services/userProvisioning.js';
 import { listClaimsForSchoolAdmin, raiseSchoolAdminClaim } from './claims.js';
 import { createStudent } from '../services/userProvisioning.js';
 import multer from 'multer';
@@ -356,6 +356,42 @@ router.get(
       enrollments = fallback.data ?? [];
     }
 
+    const enrollmentIds = enrollments.map((item) => item.id).filter(Boolean);
+
+    const { data: pendingPayments, error: pendingPaymentError } =
+      enrollmentIds.length
+        ? await adminClient
+            .from('payments')
+            .select(
+              `
+              id,
+              enrollment_id,
+              amount,
+              status,
+              due_date,
+              installment_no,
+              paid_at,
+              payment_type,
+              payment_mode
+            `
+            )
+            .in('enrollment_id', enrollmentIds)
+            .eq('status', 'pending')
+            .order('installment_no', { ascending: true })
+        : { data: [], error: null };
+
+    if (pendingPaymentError) {
+      throw new Error(pendingPaymentError.message);
+    }
+
+    const pendingPaymentMap = new Map();
+
+    for (const payment of pendingPayments ?? []) {
+      if (!pendingPaymentMap.has(payment.enrollment_id)) {
+        pendingPaymentMap.set(payment.enrollment_id, payment);
+      }
+    }
+
     const teacherIds = [
       ...new Set(
         enrollments
@@ -385,8 +421,13 @@ router.get(
 
     const rows = (students ?? []).map((student) => {
       const enrollment = enrollmentMap.get(student.id);
+
       const teacher = enrollment?.teacher_id
         ? teacherMap.get(enrollment.teacher_id)
+        : null;
+
+      const pendingPayment = enrollment?.id
+        ? pendingPaymentMap.get(enrollment.id) ?? null
         : null;
 
       return {
@@ -411,10 +452,28 @@ router.get(
         payment_status: enrollment?.payment_status ?? null,
         enrolled_at: enrollment?.enrolled_at ?? enrollment?.created_at ?? null,
         expires_at: enrollment?.expires_at ?? null,
+
+        pending_payment: pendingPayment,
+        pending_amount: pendingPayment?.amount ?? null,
+        pending_due_date: pendingPayment?.due_date ?? null,
+        pending_installment_no: pendingPayment?.installment_no ?? null,
       };
     });
 
     res.json(rows);
+  })
+);
+
+
+router.post(
+  '/students/:studentId/pay-pending-fees',
+  asyncHandler(async (req, res) => {
+    const result = await payPendingStudentFees(
+      req.user.id,
+      req.params.studentId
+    );
+
+    res.json(result);
   })
 );
 

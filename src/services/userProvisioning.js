@@ -330,6 +330,35 @@ function buildWhatsAppPayload({
   };
 }
 
+const normalizeInstallmentDates = (value) => {
+  if (!value) return [];
+
+  if (Array.isArray(value)) {
+    return value.map(String).map((v) => v.trim()).filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+
+      if (Array.isArray(parsed)) {
+        return parsed.map(String).map((v) => v.trim()).filter(Boolean);
+      }
+    } catch {
+      return value
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    }
+  }
+
+  return [];
+};
+
+const isValidDateOnly = (value) => {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
+};
+
 export async function createStudent(callerId, body) {
   const { data: teacherProfile, error: teacherProfileError } =
     await adminClient
@@ -383,24 +412,53 @@ if ((isSchoolAdmin || isCompanyAdmin) && !body.class_assigned) {
   paymentType === 'paid_with_fees'
     ? 'online'
     : normalizePaymentMode(body.payment_mode);
-  const amount = getPlanAmount(planTier, body.amount);
+const amount = getPlanAmount(planTier, body.amount);
 
- const paidAmount = Number(
-  body.paid_amount ??
-    (paymentType === 'installment' ? amount / 2 : amount)
-);
+let paidAmount = amount;
+let remainingAmount = 0;
+let installmentDates = [];
+
+if (paymentType === 'installment') {
+  installmentDates = normalizeInstallmentDates(body.installment_dates);
+
+  if (installmentDates.length < 2) {
+    throw new Error('Please select both installment dates');
+  }
+
+  if (
+    !isValidDateOnly(installmentDates[0]) ||
+    !isValidDateOnly(installmentDates[1])
+  ) {
+    throw new Error('Invalid installment date format. Use YYYY-MM-DD');
+  }
+
+  // IMPORTANT:
+  // Backend is final authority.
+  // Ignore body.paid_amount and body.remaining_amount.
+  paidAmount = Number((amount / 2).toFixed(2));
+  remainingAmount = Number((amount - paidAmount).toFixed(2));
+} else {
+  paidAmount = amount;
+  remainingAmount = 0;
+  installmentDates = [];
+}
 
 if (!Number.isFinite(paidAmount) || paidAmount < 0) {
   throw new Error('Invalid paid amount');
 }
 
-const remainingAmount =
-  paymentType === 'installment'
-    ? Math.max(0, Number(body.remaining_amount ?? amount - paidAmount))
-    : 0;
+if (!Number.isFinite(remainingAmount) || remainingAmount < 0) {
+  throw new Error('Invalid remaining amount');
+}
 
-const installmentDates =
-  paymentType === 'installment' ? body.installment_dates ?? [] : [];
+console.log('CREATE STUDENT PAYMENT DEBUG:', {
+  planTier,
+  paymentType,
+  amount,
+  paidAmount,
+  remainingAmount,
+  installmentDates,
+});
 
   const schoolResp = await adminClient
     .from('schools')
@@ -501,49 +559,56 @@ const installmentDates =
     throw new Error(enrollmentError.message);
   }
 
-if (paymentType === 'one_time' || paymentType === 'paid_with_fees') {
-    const { error } = await adminClient.from('payments').insert({
-      enrollment_id: enroll.id,
-      amount: paidAmount,
-      status: 'paid',
-      paid_at: new Date().toISOString(),
-      installment_no: 1,
-      plan_tier: planTier,
-      payment_mode: paymentMode,
-      payment_type: paymentType,
-      installment_dates: [],
-    });
+const paymentRows =
+  paymentType === 'installment'
+    ? [
+        {
+          enrollment_id: enroll.id,
+          amount: paidAmount,
+          status: 'paid',
+          paid_at: new Date().toISOString(),
+          installment_no: 1,
+          due_date: installmentDates[0],
+          plan_tier: planTier,
+          payment_mode: paymentMode,
+          payment_type: paymentType,
+          installment_dates: installmentDates,
+        },
+        {
+          enrollment_id: enroll.id,
+          amount: remainingAmount,
+          status: 'pending',
+          paid_at: null,
+          installment_no: 2,
+          due_date: installmentDates[1],
+          plan_tier: planTier,
+          payment_mode: paymentMode,
+          payment_type: paymentType,
+          installment_dates: installmentDates,
+        },
+      ]
+    : [
+        {
+          enrollment_id: enroll.id,
+          amount: paidAmount,
+          status: 'paid',
+          paid_at: new Date().toISOString(),
+          installment_no: 1,
+          due_date: null,
+          plan_tier: planTier,
+          payment_mode: paymentMode,
+          payment_type: paymentType,
+          installment_dates: [],
+        },
+      ];
 
-    if (error) throw new Error(error.message);
-  } else {
-    const { error } = await adminClient.from('payments').insert([
-      {
-        enrollment_id: enroll.id,
-        amount: paidAmount,
-        status: 'paid',
-        paid_at: new Date().toISOString(),
-        installment_no: 1,
-        due_date: installmentDates[0] ?? null,
-        plan_tier: planTier,
-        payment_mode: paymentMode,
-        payment_type: paymentType,
-        installment_dates: installmentDates,
-      },
-      {
-        enrollment_id: enroll.id,
-        amount: remainingAmount,
-        status: 'pending',
-        installment_no: 2,
-        due_date: installmentDates[1] ?? null,
-        plan_tier: planTier,
-        payment_mode: paymentMode,
-        payment_type: paymentType,
-        installment_dates: installmentDates,
-      },
-    ]);
+const { error: paymentError } = await adminClient
+  .from('payments')
+  .insert(paymentRows);
 
-    if (error) throw new Error(error.message);
-  }
+if (paymentError) {
+  throw new Error(paymentError.message);
+}
 
   const receipt = buildReceipt({
     receiptNo: `SSR-${new Date()
@@ -584,5 +649,148 @@ if (paymentType === 'one_time' || paymentType === 'paid_with_fees') {
     email,
     receipt,
     whatsapp,
+  };
+}
+
+export async function payPendingStudentFees(callerId, studentId) {
+  if (!studentId) {
+    throw new Error('Student is required');
+  }
+
+  const roles = await getCallerRoles(callerId);
+
+  const isTeacher = roles.some((r) => r.role === 'teacher');
+  const isSchoolAdmin = roles.some((r) => r.role === 'school_admin');
+  const isCompanyAdmin = roles.some((r) => r.role === 'company_admin');
+
+  if (!isTeacher && !isSchoolAdmin && !isCompanyAdmin) {
+    throw new Error('Forbidden');
+  }
+
+  const { data: callerProfile, error: callerProfileError } = await adminClient
+    .from('profiles')
+    .select('id, school_id')
+    .eq('id', callerId)
+    .maybeSingle();
+
+  if (callerProfileError) {
+    throw new Error(callerProfileError.message);
+  }
+
+  if (!callerProfile?.school_id && !isCompanyAdmin) {
+    throw new Error('School assignment missing');
+  }
+
+  let enrollmentQuery = adminClient
+    .from('enrollments')
+    .select(
+      `
+      id,
+      student_id,
+      school_id,
+      teacher_id,
+      amount,
+      payment_status,
+      payment_type
+    `
+    )
+    .eq('student_id', studentId)
+    .eq('payment_type', 'installment')
+    .eq('payment_status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (isTeacher) {
+    enrollmentQuery = enrollmentQuery.eq('teacher_id', callerId);
+  }
+
+  if (isSchoolAdmin) {
+    enrollmentQuery = enrollmentQuery.eq('school_id', callerProfile.school_id);
+  }
+
+  const { data: enrollment, error: enrollmentError } =
+    await enrollmentQuery.maybeSingle();
+
+  if (enrollmentError) {
+    throw new Error(enrollmentError.message);
+  }
+
+  if (!enrollment) {
+    throw new Error('No pending installment found for this student');
+  }
+
+  const { data: pendingPayment, error: pendingPaymentError } = await adminClient
+    .from('payments')
+    .select(
+      `
+      id,
+      enrollment_id,
+      amount,
+      status,
+      installment_no,
+      due_date
+    `
+    )
+    .eq('enrollment_id', enrollment.id)
+    .eq('status', 'pending')
+    .order('installment_no', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (pendingPaymentError) {
+    throw new Error(pendingPaymentError.message);
+  }
+
+  if (!pendingPayment) {
+    throw new Error('Pending payment row not found');
+  }
+
+  const { data: updatedPayment, error: updatePaymentError } = await adminClient
+    .from('payments')
+    .update({
+      status: 'paid',
+      paid_at: new Date().toISOString(),
+    })
+    .eq('id', pendingPayment.id)
+    .select()
+    .single();
+
+  if (updatePaymentError) {
+    throw new Error(updatePaymentError.message);
+  }
+
+  const { data: remainingPendingPayments, error: remainingError } =
+    await adminClient
+      .from('payments')
+      .select('id')
+      .eq('enrollment_id', enrollment.id)
+      .eq('status', 'pending');
+
+  if (remainingError) {
+    throw new Error(remainingError.message);
+  }
+
+  const newEnrollmentStatus =
+    (remainingPendingPayments ?? []).length > 0 ? 'pending' : 'paid';
+
+  const { data: updatedEnrollment, error: updateEnrollmentError } =
+    await adminClient
+      .from('enrollments')
+      .update({
+        payment_status: newEnrollmentStatus,
+      })
+      .eq('id', enrollment.id)
+      .select()
+      .single();
+
+  if (updateEnrollmentError) {
+    throw new Error(updateEnrollmentError.message);
+  }
+
+  return {
+    success: true,
+    message: 'Pending fees paid successfully',
+    payment: updatedPayment,
+    enrollment: updatedEnrollment,
   };
 }

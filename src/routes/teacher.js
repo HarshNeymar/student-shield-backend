@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { asyncHandler } from '../utils.js';
 import { adminClient } from '../supabase.js';
-import { createStudent } from '../services/userProvisioning.js';
+import { createStudent, payPendingStudentFees } from '../services/userProvisioning.js';
 import { listClaimsForTeacher, raiseTeacherClaim } from './claims.js';
 
 const router = Router();
@@ -81,10 +81,31 @@ async function getTeacherStudents(userId) {
     (students ?? []).map((student) => [student.id, student])
   );
 
-  return rows.map((item) => ({
-    ...item,
-    student: studentMap.get(item.student_id) ?? null,
-  }));
+ const enrollmentIds = rows.map((item) => item.id).filter(Boolean);
+
+const { data: pendingPayments, error: pendingPaymentError } = enrollmentIds.length
+  ? await adminClient
+      .from('payments')
+      .select('id, enrollment_id, amount, status, due_date, installment_no')
+      .in('enrollment_id', enrollmentIds)
+      .eq('status', 'pending')
+  : { data: [], error: null };
+
+if (pendingPaymentError) {
+  throw new Error(pendingPaymentError.message);
+}
+
+const pendingPaymentMap = new Map(
+  (pendingPayments ?? []).map((payment) => [payment.enrollment_id, payment])
+);
+
+return rows.map((item) => ({
+  ...item,
+  student: studentMap.get(item.student_id) ?? null,
+  pending_payment: pendingPaymentMap.get(item.id) ?? null,
+  pending_amount: pendingPaymentMap.get(item.id)?.amount ?? null,
+  pending_due_date: pendingPaymentMap.get(item.id)?.due_date ?? null,
+}));
 }
 
 function getPlanLabel(plan) {
@@ -161,6 +182,19 @@ router.get(
     const students = await getTeacherStudents(req.user.id);
 
     res.json(students);
+  })
+);
+
+
+router.post(
+  '/students/:studentId/pay-pending-fees',
+  asyncHandler(async (req, res) => {
+    const result = await payPendingStudentFees(
+      req.user.id,
+      req.params.studentId
+    );
+
+    res.json(result);
   })
 );
 

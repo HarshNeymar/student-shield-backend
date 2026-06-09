@@ -149,6 +149,45 @@ router.get(
     const planTier =
       enrollment?.plan_tier ?? school?.selected_plan_tier ?? 'basic';
 
+    let pendingInstallment = null;
+    let payments = [];
+
+    if (enrollment?.id) {
+      const { data: paymentRows, error: paymentsError } = await adminClient
+        .from('payments')
+        .select(
+          `
+          id,
+          enrollment_id,
+          amount,
+          status,
+          paid_at,
+          due_date,
+          installment_no,
+          payment_mode,
+          payment_type,
+          created_at
+        `
+        )
+        .eq('enrollment_id', enrollment.id)
+        .order('installment_no', { ascending: true });
+
+      if (paymentsError) {
+        console.warn('Student payments lookup error:', paymentsError.message);
+      }
+
+      payments = paymentRows ?? [];
+
+      pendingInstallment =
+        payments.find(
+          (payment) =>
+            payment.status === 'pending' &&
+            Number(payment.installment_no) === 2
+        ) ??
+        payments.find((payment) => payment.status === 'pending') ??
+        null;
+    }
+
     const { count: reportsCount, error: reportsCountError } =
       await adminClient
         .from('wellness_reports')
@@ -173,6 +212,16 @@ router.get(
       school,
       teacher,
       enrollment,
+      payments,
+      pendingInstallment,
+      secondInstallment: pendingInstallment
+        ? {
+            amount: pendingInstallment.amount,
+            due_date: pendingInstallment.due_date,
+            status: pendingInstallment.status,
+            installment_no: pendingInstallment.installment_no,
+          }
+        : null,
       plan: {
         tier: planTier,
         name: getPlanLabel(planTier),
