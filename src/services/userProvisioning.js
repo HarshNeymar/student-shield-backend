@@ -1,5 +1,8 @@
 import { adminClient } from '../supabase.js';
-
+import {
+  buildStudentEnrollmentWhatsAppMessage,
+  sendWhatsAppTextMessage,
+} from './whatsapp.js';
 export async function getCallerRoles(callerId) {
   const { data, error } = await adminClient
     .from('user_roles')
@@ -627,21 +630,35 @@ if (paymentError) {
     installmentDates,
   });
 
-  const whatsapp = buildWhatsAppPayload({
-    parentPhone: body.parent_phone,
-    schoolName,
-    studentName: body.full_name,
-    planTier,
-    amount,
-    paymentMode,
-    paymentType,
-    paidAmount,
-    remainingAmount,
-    receipt,
-    loginEmail: email,
-    rawUsername: body.username,
-    password: body.password,
-  });
+const whatsappPayload = buildStudentEnrollmentWhatsAppMessage({
+  parentPhone: body.parent_phone,
+  schoolName,
+  studentName: body.full_name,
+  classAssigned,
+  planTier,
+  planDuration,
+  amount,
+  paymentMode,
+  paymentType,
+  paidAmount: finalPaidAmount ?? paidAmount,
+  remainingAmount: finalRemainingAmount ?? remainingAmount,
+  installmentDates,
+  receipt,
+  loginEmail: email,
+  password: body.password,
+});
+
+const whatsappSendResult = await sendWhatsAppTextMessage({
+  to: whatsappPayload.to,
+  message: whatsappPayload.message,
+});
+
+const whatsapp = {
+  status: whatsappSendResult.sent ? 'sent' : 'failed',
+  to: whatsappPayload.to,
+  message: whatsappPayload.message,
+  provider_response: whatsappSendResult,
+};
 
   return {
     success: true,
