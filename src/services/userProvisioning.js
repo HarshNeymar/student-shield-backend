@@ -420,7 +420,15 @@ const amount = getPlanAmount(planTier, body.amount);
 let paidAmount = amount;
 let remainingAmount = 0;
 let installmentDates = [];
+const finalPaidAmount =
+  paymentType === 'installment'
+    ? Number((amount / 2).toFixed(2))
+    : amount;
 
+const finalRemainingAmount =
+  paymentType === 'installment'
+    ? Number((amount - finalPaidAmount).toFixed(2))
+    : 0;
 if (paymentType === 'installment') {
   installmentDates = normalizeInstallmentDates(body.installment_dates);
 
