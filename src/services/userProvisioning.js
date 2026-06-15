@@ -388,92 +388,37 @@ export async function createStudent(callerId, body) {
     throw new Error('Missing required fields');
   }
 
-const isTeacher = roles.some((r) => r.role === 'teacher');
-const isSchoolAdmin = roles.some((r) => r.role === 'school_admin');
-const isCompanyAdmin = roles.some((r) => r.role === 'company_admin');
+  const isTeacher = roles.some((r) => r.role === 'teacher');
+  const isSchoolAdmin = roles.some((r) => r.role === 'school_admin');
+  const isCompanyAdmin = roles.some((r) => r.role === 'company_admin');
 
-const classAssigned = isTeacher
-  ? teacherProfile.class_assigned
-  : body.class_assigned;
+  const classAssigned = isTeacher
+    ? teacherProfile.class_assigned
+    : body.class_assigned;
 
-if (isTeacher && !teacherProfile.class_assigned) {
-  throw new Error('Teacher assigned class is missing');
-}
+  if (isTeacher && !teacherProfile.class_assigned) {
+    throw new Error('Teacher assigned class is missing');
+  }
 
-if ((isSchoolAdmin || isCompanyAdmin) && !body.class_assigned) {
-  throw new Error('Class is required');
-}
+  if ((isSchoolAdmin || isCompanyAdmin) && !body.class_assigned) {
+    throw new Error('Class is required');
+  }
 
   if (!classAssigned) {
     throw new Error('Assigned class is required');
   }
 
-  const planTier = normalizePlanTier(body.plan_tier ?? body.plan);
-  const planDuration = 'yearly';
-  const paymentType = normalizePaymentType(body.payment_type);
-  const paymentMode =
-  paymentType === 'paid_with_fees'
-    ? 'online'
-    : normalizePaymentMode(body.payment_mode);
-const amount = getPlanAmount(planTier, body.amount);
-
-let paidAmount = amount;
-let remainingAmount = 0;
-let installmentDates = [];
-const finalPaidAmount =
-  paymentType === 'installment'
-    ? Math.ceil(amount / 2)
-    : amount;
-
-const finalRemainingAmount =
-  paymentType === 'installment'
-    ? amount - finalPaidAmount
-    : 0;
-if (paymentType === 'installment') {
-  installmentDates = normalizeInstallmentDates(body.installment_dates);
-
-  if (installmentDates.length < 2) {
-    throw new Error('Please select both installment dates');
-  }
-
-  if (
-    !isValidDateOnly(installmentDates[0]) ||
-    !isValidDateOnly(installmentDates[1])
-  ) {
-    throw new Error('Invalid installment date format. Use YYYY-MM-DD');
-  }
-
-  // IMPORTANT:
-  // Backend is final authority.
-  // Ignore body.paid_amount and body.remaining_amount.
-  paidAmount = Number((amount / 2).toFixed(2));
-  remainingAmount = Number((amount - paidAmount).toFixed(2));
-} else {
-  paidAmount = amount;
-  remainingAmount = 0;
-  installmentDates = [];
-}
-
-if (!Number.isFinite(paidAmount) || paidAmount < 0) {
-  throw new Error('Invalid paid amount');
-}
-
-if (!Number.isFinite(remainingAmount) || remainingAmount < 0) {
-  throw new Error('Invalid remaining amount');
-}
-
-console.log('CREATE STUDENT PAYMENT DEBUG:', {
-  planTier,
-  paymentType,
-  amount,
-  paidAmount,
-  remainingAmount,
-  installmentDates,
-});
-
   const schoolResp = await adminClient
     .from('schools')
-    .select('id, name')
+    .select(
+      `
+      id,
+      name,
+      selected_plan_tier,
+      benefits_started_at,
+      benefits_expires_at
+    `
+    )
     .eq('id', teacherProfile.school_id)
     .maybeSingle();
 
@@ -481,7 +426,87 @@ console.log('CREATE STUDENT PAYMENT DEBUG:', {
     throw new Error(schoolResp.error.message);
   }
 
-  const schoolName = schoolResp.data?.name ?? 'School';
+  const school = schoolResp.data;
+
+  if (!school) {
+    throw new Error('School not found');
+  }
+
+  if (!school.benefits_expires_at) {
+    throw new Error('School benefits expiry date is not configured');
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const benefitExpiryDateOnly = String(school.benefits_expires_at).slice(0, 10);
+
+  if (benefitExpiryDateOnly < today) {
+    throw new Error(
+      'School benefits plan has expired. Please renew school plan before enrolling students.'
+    );
+  }
+
+  const schoolName = school.name ?? 'School';
+  const schoolBenefitsExpiresAt = `${benefitExpiryDateOnly}T23:59:59.999Z`;
+
+  const planTier = normalizePlanTier(body.plan_tier ?? body.plan);
+  const selectedSchoolPlan = school.selected_plan_tier ?? 'basic';
+
+  if (planTier !== selectedSchoolPlan) {
+    throw new Error(
+      `Selected plan does not match school assigned plan. School plan is ${selectedSchoolPlan}.`
+    );
+  }
+
+  const planDuration = 'yearly';
+  const paymentType = normalizePaymentType(body.payment_type);
+
+  const paymentMode =
+    paymentType === 'paid_with_fees'
+      ? 'online'
+      : normalizePaymentMode(body.payment_mode);
+
+  const amount = getPlanAmount(planTier, body.amount);
+
+  let installmentDates = normalizeInstallmentDates(body.installment_dates);
+
+  if (paymentType === 'installment') {
+    if (installmentDates.length < 2) {
+      throw new Error('Please select both installment dates');
+    }
+
+    if (
+      !isValidDateOnly(installmentDates[0]) ||
+      !isValidDateOnly(installmentDates[1])
+    ) {
+      throw new Error('Invalid installment date format. Use YYYY-MM-DD');
+    }
+  } else {
+    installmentDates = [];
+  }
+
+  const finalPaidAmount =
+    paymentType === 'installment' ? Math.ceil(amount / 2) : amount;
+
+  const finalRemainingAmount =
+    paymentType === 'installment' ? amount - finalPaidAmount : 0;
+
+  if (!Number.isFinite(finalPaidAmount) || finalPaidAmount < 0) {
+    throw new Error('Invalid paid amount');
+  }
+
+  if (!Number.isFinite(finalRemainingAmount) || finalRemainingAmount < 0) {
+    throw new Error('Invalid remaining amount');
+  }
+
+  console.log('CREATE STUDENT PAYMENT DEBUG:', {
+    planTier,
+    paymentType,
+    amount,
+    finalPaidAmount,
+    finalRemainingAmount,
+    installmentDates,
+    schoolBenefitsExpiresAt,
+  });
 
   const email = body.username.includes('@')
     ? body.username
@@ -543,25 +568,18 @@ console.log('CREATE STUDENT PAYMENT DEBUG:', {
       school_id: teacherProfile.school_id,
       teacher_id: isTeacher ? callerId : body.teacher_id ?? null,
 
-      // Existing DB enum column: monthly / quarterly / half_yearly / yearly
       plan: planDuration,
-
-      // Correct Student Shield fields
       plan_tier: planTier,
       plan_duration: planDuration,
 
       amount,
-
-      // DB payment method enum: cash/card/upi/bank_transfer/cheque/online
       payment_mode: paymentMode,
-
-      // Business payment flow: one_time/installment
       payment_type: paymentType,
-
-      payment_status: remainingAmount > 0 ? 'partial' : 'paid',
+      payment_status: finalRemainingAmount > 0 ? 'pending' : 'paid',
       installment_dates: installmentDates,
 
-      expires_at: getExpiryDate(),
+      enrolled_at: new Date().toISOString(),
+      expires_at: schoolBenefitsExpiresAt,
     })
     .select()
     .single();
@@ -570,56 +588,56 @@ console.log('CREATE STUDENT PAYMENT DEBUG:', {
     throw new Error(enrollmentError.message);
   }
 
-const paymentRows =
-  paymentType === 'installment'
-    ? [
-        {
-          enrollment_id: enroll.id,
-          amount: paidAmount,
-          status: 'paid',
-          paid_at: new Date().toISOString(),
-          installment_no: 1,
-          due_date: installmentDates[0],
-          plan_tier: planTier,
-          payment_mode: paymentMode,
-          payment_type: paymentType,
-          installment_dates: installmentDates,
-        },
-        {
-          enrollment_id: enroll.id,
-          amount: remainingAmount,
-          status: 'pending',
-          paid_at: null,
-          installment_no: 2,
-          due_date: installmentDates[1],
-          plan_tier: planTier,
-          payment_mode: paymentMode,
-          payment_type: paymentType,
-          installment_dates: installmentDates,
-        },
-      ]
-    : [
-        {
-          enrollment_id: enroll.id,
-          amount: paidAmount,
-          status: 'paid',
-          paid_at: new Date().toISOString(),
-          installment_no: 1,
-          due_date: null,
-          plan_tier: planTier,
-          payment_mode: paymentMode,
-          payment_type: paymentType,
-          installment_dates: [],
-        },
-      ];
+  const paymentRows =
+    paymentType === 'installment'
+      ? [
+          {
+            enrollment_id: enroll.id,
+            amount: finalPaidAmount,
+            status: 'paid',
+            paid_at: new Date().toISOString(),
+            installment_no: 1,
+            due_date: installmentDates[0],
+            plan_tier: planTier,
+            payment_mode: paymentMode,
+            payment_type: paymentType,
+            installment_dates: installmentDates,
+          },
+          {
+            enrollment_id: enroll.id,
+            amount: finalRemainingAmount,
+            status: 'pending',
+            paid_at: null,
+            installment_no: 2,
+            due_date: installmentDates[1],
+            plan_tier: planTier,
+            payment_mode: paymentMode,
+            payment_type: paymentType,
+            installment_dates: installmentDates,
+          },
+        ]
+      : [
+          {
+            enrollment_id: enroll.id,
+            amount: finalPaidAmount,
+            status: 'paid',
+            paid_at: new Date().toISOString(),
+            installment_no: 1,
+            due_date: null,
+            plan_tier: planTier,
+            payment_mode: paymentMode,
+            payment_type: paymentType,
+            installment_dates: [],
+          },
+        ];
 
-const { error: paymentError } = await adminClient
-  .from('payments')
-  .insert(paymentRows);
+  const { error: paymentError } = await adminClient
+    .from('payments')
+    .insert(paymentRows);
 
-if (paymentError) {
-  throw new Error(paymentError.message);
-}
+  if (paymentError) {
+    throw new Error(paymentError.message);
+  }
 
   const receipt = buildReceipt({
     receiptNo: `SSR-${new Date()
@@ -633,40 +651,41 @@ if (paymentError) {
     amount,
     paymentMode,
     paymentType,
-    paidAmount,
-    remainingAmount,
+    paidAmount: finalPaidAmount,
+    remainingAmount: finalRemainingAmount,
     installmentDates,
+    benefitExpiryDate: benefitExpiryDateOnly,
   });
 
-const whatsappPayload = buildStudentEnrollmentWhatsAppMessage({
-  parentPhone: body.parent_phone,
-  schoolName,
-  studentName: body.full_name,
-  classAssigned,
-  planTier,
-  planDuration,
-  amount,
-  paymentMode,
-  paymentType,
-  paidAmount: finalPaidAmount ?? paidAmount,
-  remainingAmount: finalRemainingAmount ?? remainingAmount,
-  installmentDates,
-  receipt,
-  loginEmail: email,
-  password: body.password,
-});
+  const whatsappPayload = buildStudentEnrollmentWhatsAppMessage({
+    parentPhone: body.parent_phone,
+    schoolName,
+    studentName: body.full_name,
+    classAssigned,
+    planTier,
+    planDuration,
+    amount,
+    paymentMode,
+    paymentType,
+    paidAmount: finalPaidAmount,
+    remainingAmount: finalRemainingAmount,
+    installmentDates,
+    receipt,
+    loginEmail: email,
+    password: body.password,
+  });
 
-const whatsappSendResult = await sendWhatsAppTextMessage({
-  to: whatsappPayload.to,
-  message: whatsappPayload.message,
-});
+  const whatsappSendResult = await sendWhatsAppTextMessage({
+    to: whatsappPayload.to,
+    message: whatsappPayload.message,
+  });
 
-const whatsapp = {
-  status: whatsappSendResult.sent ? 'sent' : 'failed',
-  to: whatsappPayload.to,
-  message: whatsappPayload.message,
-  provider_response: whatsappSendResult,
-};
+  const whatsapp = {
+    status: whatsappSendResult.sent ? 'sent' : 'failed',
+    to: whatsappPayload.to,
+    message: whatsappPayload.message,
+    provider_response: whatsappSendResult,
+  };
 
   return {
     success: true,
