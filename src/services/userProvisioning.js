@@ -422,12 +422,12 @@ let remainingAmount = 0;
 let installmentDates = [];
 const finalPaidAmount =
   paymentType === 'installment'
-    ? Number((amount / 2).toFixed(2))
+    ? Math.ceil(amount / 2)
     : amount;
 
 const finalRemainingAmount =
   paymentType === 'installment'
-    ? Number((amount - finalPaidAmount).toFixed(2))
+    ? amount - finalPaidAmount
     : 0;
 if (paymentType === 'installment') {
   installmentDates = normalizeInstallmentDates(body.installment_dates);
