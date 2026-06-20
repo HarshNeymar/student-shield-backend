@@ -10,6 +10,7 @@ import companyRoutes from './routes/company.js';
 import schoolRoutes from './routes/school.js';
 import studentRoutes from './routes/student.js';
 import teacherRoutes from './routes/teacher.js';
+import smartBuddyRoutes from './routes/smartBuddy.js';
 
 const app = express();
 const allowedOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:5173').split(',').map((v) => v.trim());
@@ -37,6 +38,8 @@ app.use('/api/company', requireAuth, companyRoutes);
 app.use('/api/school', requireAuth, schoolRoutes);
 app.use('/api/student', requireAuth, studentRoutes);
 app.use('/api/teacher', requireAuth, teacherRoutes);
+// Smart Buddy uses its own short-lived, scoped session token issued by /api/student/smart-buddy/launch.
+app.use('/api/smart-buddy', smartBuddyRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error(err);
