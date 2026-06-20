@@ -15,40 +15,13 @@ import smartBuddyRoutes from './routes/smartBuddy.js';
 
 const app = express();
 
-const normalizeOrigin = (value) =>
-  String(value || '')
-    .trim()
-    .replace(/\/+$/, '');
-
-const allowedOrigins = new Set(
-  [
-    'http://localhost:5173',
-    'http://localhost:8080',
-    'https://sheild-kappa.vercel.app',
-    'https://student-shield-frontend.vercel.app',
-
-    ...(process.env.CORS_ORIGIN || '')
-      .split(',')
-      .map(normalizeOrigin)
-      .filter(Boolean),
-  ].map(normalizeOrigin)
-);
-
-const corsOptions = {
+/*
+  TEMPORARY: Allow every frontend origin.
+  Uses reflected origin instead of "*" so Authorization/cookies can work.
+*/
+const allowAllCors = cors({
   origin(origin, callback) {
-    // Allows Postman, Render health checks, server-to-server requests.
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    const normalizedOrigin = normalizeOrigin(origin);
-
-    if (allowedOrigins.has(normalizedOrigin)) {
-      return callback(null, true);
-    }
-
-    console.warn(`CORS blocked for origin: ${origin}`);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    callback(null, true);
   },
 
   credentials: true,
@@ -63,13 +36,11 @@ const corsOptions = {
 
   exposedHeaders: ['Content-Type'],
   maxAge: 86400,
-};
+});
 
-// Must stay before helmet, JSON parsing, authentication, and all API routes.
-app.use(cors(corsOptions));
-
-// Explicit preflight handler. Regex works with Express 4 and Express 5.
-app.options(/.*/, cors(corsOptions));
+// Keep CORS before helmet, JSON middleware, authentication, and API routes.
+app.use(allowAllCors);
+app.options(/.*/, allowAllCors);
 
 app.use(
   helmet({
@@ -80,7 +51,12 @@ app.use(
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan('dev'));
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => {
+  res.json({
+    ok: true,
+    cors: 'allow-all',
+  });
+});
 
 app.use('/api/auth', requireAuth, authRoutes);
 app.use('/api/onboarding', requireAuth, onboardingRoutes);
@@ -89,7 +65,7 @@ app.use('/api/school', requireAuth, schoolRoutes);
 app.use('/api/student', requireAuth, studentRoutes);
 app.use('/api/teacher', requireAuth, teacherRoutes);
 
-// Smart Buddy has its own scoped launch/session-token authentication.
+// Smart Buddy uses its own scoped launch/session token.
 app.use('/api/smart-buddy', smartBuddyRoutes);
 
 app.use((err, _req, res, _next) => {
@@ -99,9 +75,7 @@ app.use((err, _req, res, _next) => {
 
   const status = message.toLowerCase().startsWith('forbidden')
     ? 403
-    : message.toLowerCase().includes('cors blocked')
-      ? 403
-      : 500;
+    : 500;
 
   res.status(status).json({ error: message });
 });
