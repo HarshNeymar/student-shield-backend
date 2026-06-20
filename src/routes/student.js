@@ -7,7 +7,14 @@ import {
   listClaimsForStudent,
   listClaimsRaisedByUser,
 } from './claims.js';
-
+import {
+  createSmartBuddyLaunch,
+  getSmartBuddyProfile,
+  getSmartBuddyReportDownload,
+  listSmartBuddyReports,
+  saveSmartBuddyProfile,
+  uploadSmartBuddyReport,
+} from '../services/smartBuddy.js';
 const router = Router();
 
 const upload = multer({
@@ -18,6 +25,13 @@ const upload = multer({
   },
 });
 
+const smartBuddyReportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 15 * 1024 * 1024,
+    files: 1,
+  },
+});
 function getPlanLabel(plan) {
   const labels = {
     basic: 'Basic Plan',
@@ -382,6 +396,74 @@ router.post(
     );
 
     res.status(201).json(claim);
+  })
+);
+
+
+// Main Student Shield portal routes.
+// These use the student's normal Supabase login token.
+router.post(
+  '/smart-buddy/launch',
+  asyncHandler(async (req, res) => {
+    const launch = await createSmartBuddyLaunch(req.user.id);
+    res.status(201).json(launch);
+  })
+);
+
+router.get(
+  '/smart-buddy/profile',
+  asyncHandler(async (req, res) => {
+    const profile = await getSmartBuddyProfile(req.user.id);
+    res.json(profile);
+  })
+);
+
+router.put(
+  '/smart-buddy/profile',
+  asyncHandler(async (req, res) => {
+    const saved = await saveSmartBuddyProfile(req.user.id, req.body);
+
+    res.json({
+      success: true,
+      saved_profile: saved,
+    });
+  })
+);
+
+router.post(
+  '/smart-buddy/reports',
+  smartBuddyReportUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    const report = await uploadSmartBuddyReport(
+      req.user.id,
+      req.file,
+      req.body
+    );
+
+    res.status(201).json({
+      success: true,
+      report,
+    });
+  })
+);
+
+router.get(
+  '/smart-buddy/reports',
+  asyncHandler(async (req, res) => {
+    const reports = await listSmartBuddyReports(req.user.id);
+    res.json(reports);
+  })
+);
+
+router.get(
+  '/smart-buddy/reports/:reportId/download',
+  asyncHandler(async (req, res) => {
+    const report = await getSmartBuddyReportDownload(
+      req.user.id,
+      req.params.reportId
+    );
+
+    res.json(report);
   })
 );
 
