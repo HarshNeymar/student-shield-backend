@@ -6,7 +6,7 @@ export const SMART_BUDDY_REPORTS_BUCKET =
 
 const MAX_PROFILE_JSON_BYTES = 1024 * 1024; // 1 MB per saved object
 const MAX_REPORT_JSON_BYTES = 1024 * 1024; // 1 MB report snapshot
-const MAX_PDF_BYTES = 15 * 1024 * 1024; // 15 MB
+const MAX_PDF_BYTES = 50 * 1024 * 1024; // 15 MB
 const DEFAULT_LAUNCH_TTL_MINUTES = 5;
 const DEFAULT_SESSION_TTL_HOURS = 8;
 
