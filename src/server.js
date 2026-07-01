@@ -12,7 +12,7 @@ import schoolRoutes from './routes/school.js';
 import studentRoutes from './routes/student.js';
 import teacherRoutes from './routes/teacher.js';
 import smartBuddyRoutes from './routes/smartBuddy.js';
-
+import whatsappWebhookRoutes from './routes/whatsappWebhook.js';
 const app = express();
 
 /*
@@ -48,7 +48,14 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: '2mb' }));
+app.use(
+  express.json({
+    limit: '2mb',
+    verify: (req, _res, buffer) => {
+      req.rawBody = Buffer.from(buffer);
+    },
+  })
+);
 app.use(morgan('dev'));
 
 app.get('/health', (_req, res) => {
