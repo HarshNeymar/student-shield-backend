@@ -57,7 +57,7 @@ app.use(
   })
 );
 app.use(morgan('dev'));
-
+app.use('/api/webhooks/whatsapp', whatsappWebhookRoutes);
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
