@@ -7,7 +7,7 @@ import {
   getCallerRoles,
 } from '../services/userProvisioning.js';
 import { listAllClaimsForCompany, updateClaimStatus } from './claims.js';
-
+import { deleteSchoolWithAllData } from '../services/schoolDeletion.js';
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -953,7 +953,7 @@ router.delete(
   asyncHandler(async (req, res) => {
     await assertCompanyAdmin(req);
 
-    const schoolId = req.params.schoolId;
+    const schoolId = String(req.params.schoolId || '').trim();
 
     if (!schoolId) {
       return res.status(400).json({
@@ -961,33 +961,14 @@ router.delete(
       });
     }
 
-    const { data: school, error: schoolError } = await adminClient
-      .from('schools')
-      .select('id, name')
-      .eq('id', schoolId)
-      .maybeSingle();
-
-    if (schoolError) throw new Error(schoolError.message);
-
-    if (!school) {
-      return res.status(404).json({
-        error: 'School not found',
-      });
-    }
-
-    const { error } = await adminClient
-      .from('schools')
-      .delete()
-      .eq('id', schoolId);
-
-    if (error) throw new Error(error.message);
+    const result = await deleteSchoolWithAllData(schoolId);
 
     res.json({
       success: true,
-      message: 'School deleted successfully',
-      deleted_school: school,
+      message:
+        'School, school admins, teachers, students, payments, claims, reports, sessions and private files were deleted successfully.',
+      ...result,
     });
   })
 );
-
 export default router;
