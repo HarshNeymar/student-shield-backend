@@ -57,6 +57,36 @@ async function getStudentProfile(userId) {
   return data;
 }
 
+function normalizeClassName(value) {
+  return String(value ?? '').trim();
+}
+
+function getSessionTargetClasses(session) {
+  const fromNewColumn = Array.isArray(session?.target_classes)
+    ? session.target_classes
+        .map(normalizeClassName)
+        .filter(Boolean)
+    : [];
+
+  if (fromNewColumn.length) {
+    return [...new Set(fromNewColumn)];
+  }
+
+  const legacyClass = normalizeClassName(session?.target_class);
+
+  return legacyClass ? [legacyClass] : [];
+}
+
+function isSessionAvailableForStudent(session, studentClass) {
+  const targetClasses = getSessionTargetClasses(session);
+
+  // Empty target_classes means All classes.
+  return (
+    targetClasses.length === 0 ||
+    targetClasses.includes(normalizeClassName(studentClass))
+  );
+}
+
 async function getStudentEnrollment(userId) {
   const withNewColumns = await adminClient
     .from('enrollments')
@@ -306,14 +336,25 @@ router.get(
       .from('sessions')
       .select('*')
       .eq('target_school_id', profile.school_id)
-      .or(
-        `target_class.eq.${profile.class_assigned},target_class.is.null,target_class.eq.`
-      )
       .order('scheduled_at', { ascending: false });
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
-    res.json(data ?? []);
+    res.json(
+      (data ?? [])
+        .filter((session) =>
+          isSessionAvailableForStudent(
+            session,
+            profile.class_assigned
+          )
+        )
+        .map((session) => ({
+          ...session,
+          target_classes: getSessionTargetClasses(session),
+        }))
+    );
   })
 );
 
@@ -334,7 +375,9 @@ router.get(
       .eq('id', req.params.sessionId)
       .maybeSingle();
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      throw new Error(error.message);
+    }
 
     if (!session) {
       return res.status(404).json({
@@ -342,9 +385,13 @@ router.get(
       });
     }
 
-    const sameSchool = session.target_school_id === profile.school_id;
-    const sameClass =
-      !session.target_class || session.target_class === profile.class_assigned;
+    const sameSchool =
+      session.target_school_id === profile.school_id;
+
+    const sameClass = isSessionAvailableForStudent(
+      session,
+      profile.class_assigned
+    );
 
     if (!sameSchool || !sameClass) {
       return res.status(403).json({
@@ -362,7 +409,9 @@ router.get(
       .from('session-recordings')
       .createSignedUrl(session.recording_url, 60 * 30);
 
-    if (signedError) throw new Error(signedError.message);
+    if (signedError) {
+      throw new Error(signedError.message);
+    }
 
     res.json({
       signedUrl: data.signedUrl,

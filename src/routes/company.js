@@ -26,6 +26,80 @@ function sumAmount(rows = []) {
   return rows.reduce((total, row) => total + Number(row.amount ?? 0), 0);
 }
 
+function normalizeClassName(value) {
+  return String(value ?? '').trim();
+}
+
+function parseTargetClasses(value) {
+  let rawValues = [];
+
+  if (Array.isArray(value)) {
+    rawValues = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        rawValues = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        rawValues = trimmed.split(',');
+      }
+    } else if (trimmed) {
+      rawValues = trimmed.split(',');
+    }
+  }
+
+  return [
+    ...new Set(
+      rawValues
+        .map(normalizeClassName)
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function sessionTargetClasses(session) {
+  const fromNewColumn = parseTargetClasses(session?.target_classes);
+
+  if (fromNewColumn.length) {
+    return fromNewColumn;
+  }
+
+  const legacyClass = normalizeClassName(session?.target_class);
+
+  return legacyClass ? [legacyClass] : [];
+}
+
+function parseBoolean(value) {
+  return ['true', '1', 'yes', 'all'].includes(
+    String(value ?? '').trim().toLowerCase()
+  );
+}
+
+async function getSchoolClassOptions(schoolId) {
+  const { data, error } = await adminClient
+    .from('profiles')
+    .select('class_assigned')
+    .eq('school_id', schoolId)
+    .not('class_assigned', 'is', null)
+    .order('class_assigned', { ascending: true });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return [
+    ...new Set(
+      (data ?? [])
+        .map((row) => normalizeClassName(row.class_assigned))
+        .filter(Boolean)
+    ),
+  ].sort((left, right) =>
+    left.localeCompare(right, undefined, { numeric: true })
+  );
+}
+
 function countPlanDistribution(enrollments = []) {
   const counts = {
     basic: 0,
@@ -775,6 +849,40 @@ router.get(
     res.json(data ?? []);
   })
 );
+router.get(
+  '/sessions/schools/:schoolId/classes',
+  asyncHandler(async (req, res) => {
+    await assertCompanyAdmin(req);
+
+    const schoolId = String(req.params.schoolId ?? '').trim();
+
+    if (!schoolId) {
+      return res.status(400).json({ error: 'Missing schoolId' });
+    }
+
+    const { data: school, error: schoolError } = await adminClient
+      .from('schools')
+      .select('id, name')
+      .eq('id', schoolId)
+      .maybeSingle();
+
+    if (schoolError) {
+      throw new Error(schoolError.message);
+    }
+
+    if (!school) {
+      return res.status(404).json({ error: 'School not found' });
+    }
+
+    const classes = await getSchoolClassOptions(schoolId);
+
+    res.json({
+      school_id: school.id,
+      school_name: school.name,
+      classes,
+    });
+  })
+);
 
 router.get(
   '/sessions',
@@ -802,15 +910,24 @@ router.get(
       throw new Error(schoolError.message);
     }
 
-    const sMap = new Map((schoolsData ?? []).map((s) => [s.id, s.name]));
+    const schoolMap = new Map(
+      (schoolsData ?? []).map((school) => [school.id, school.name])
+    );
 
     res.json(
-      (data ?? []).map((session) => ({
-        ...session,
-        school_name: session.target_school_id
-          ? sMap.get(session.target_school_id) ?? '—'
-          : 'All schools',
-      }))
+      (data ?? []).map((session) => {
+        const targetClasses = sessionTargetClasses(session);
+
+        return {
+          ...session,
+          target_classes: targetClasses,
+          target_class_scope:
+            targetClasses.length === 0 ? 'all' : 'selected',
+          school_name: session.target_school_id
+            ? schoolMap.get(session.target_school_id) ?? '—'
+            : 'All schools',
+        };
+      })
     );
   })
 );
@@ -822,12 +939,71 @@ router.post(
     await assertCompanyAdmin(req);
 
     const form = req.body;
+    const schoolId = String(form.target_school_id ?? '').trim();
+
+    if (!schoolId) {
+      return res.status(400).json({
+        error: 'Please select a school for this counseling session',
+      });
+    }
+
+    const { data: school, error: schoolError } = await adminClient
+      .from('schools')
+      .select('id')
+      .eq('id', schoolId)
+      .maybeSingle();
+
+    if (schoolError) {
+      throw new Error(schoolError.message);
+    }
+
+    if (!school) {
+      return res.status(404).json({
+        error: 'Selected school was not found',
+      });
+    }
+
+    const classesForSchool = await getSchoolClassOptions(schoolId);
+
+    if (!classesForSchool.length) {
+      return res.status(400).json({
+        error:
+          'No classes are available for this school. Create a teacher or student with a class first.',
+      });
+    }
+
+    const selectAllClasses = parseBoolean(form.target_all_classes);
+
+    let selectedClasses = parseTargetClasses(form.target_classes);
+
+    // Supports old frontend submitting one target_class.
+    if (!selectAllClasses && !selectedClasses.length) {
+      selectedClasses = parseTargetClasses(form.target_class);
+    }
+
+    if (!selectAllClasses && !selectedClasses.length) {
+      return res.status(400).json({
+        error: 'Select one or more classes, or choose All classes',
+      });
+    }
+
+    const invalidClasses = selectedClasses.filter(
+      (className) => !classesForSchool.includes(className)
+    );
+
+    if (invalidClasses.length) {
+      return res.status(400).json({
+        error: `These classes do not belong to the selected school: ${invalidClasses.join(', ')}`,
+      });
+    }
+
+    // Empty target_classes means All classes for this school.
+    const targetClasses = selectAllClasses ? [] : selectedClasses;
+
     let recording_url = null;
 
     if (req.file) {
-      const path = `${
-        form.target_school_id || 'global'
-      }/${Date.now()}-${req.file.originalname}`;
+      const path = `${schoolId}/${Date.now()}-${req.file.originalname}`;
 
       const { error } = await adminClient.storage
         .from('session-recordings')
@@ -848,10 +1024,16 @@ router.post(
       .insert({
         title: form.title,
         description: form.description || null,
-        target_school_id: form.target_school_id || null,
-        target_class: form.target_class || null,
+        target_school_id: schoolId,
+
+        // Backward compatibility for old single-class data.
+        target_class:
+          targetClasses.length === 1 ? targetClasses[0] : null,
+
+        target_classes: targetClasses,
         scheduled_at: form.scheduled_at,
         duration_minutes: Number(form.duration_minutes || 30),
+        meeting_url: form.meeting_url || null,
         recording_url,
         created_by: req.user.id,
       })
@@ -862,7 +1044,12 @@ router.post(
       throw new Error(error.message);
     }
 
-    res.status(201).json(data);
+    res.status(201).json({
+      ...data,
+      target_classes: sessionTargetClasses(data),
+      target_class_scope:
+        targetClasses.length === 0 ? 'all' : 'selected',
+    });
   })
 );
 
