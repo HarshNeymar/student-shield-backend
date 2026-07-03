@@ -9,11 +9,84 @@ const MAX_REPORT_JSON_BYTES = 1024 * 1024; // 1 MB report snapshot
 const MAX_PDF_BYTES = 50 * 1024 * 1024; // 15 MB
 const DEFAULT_LAUNCH_TTL_MINUTES = 5;
 const DEFAULT_SESSION_TTL_HOURS = 8;
+const DEFAULT_REPORT_LIMIT_PER_TYPE = 2;
+const MAX_REPORT_LIMIT_PER_TYPE = 20;
+
+export const SMART_BUDDY_REPORT_TYPES = Object.freeze([
+  'PRE_DAILY_ROUTINE',
+  'PRE_NUTRITION',
+  'SCHOOL_STUDY',
+  'SCHOOL_DIET',
+  'SCHOOL_WELLNESS',
+]);
+
+export class SmartBuddyReportLimitError extends Error {
+  constructor({ reportType, limit, used }) {
+    super(
+      `You have reached the maximum of ${limit} ${reportType} report(s). Please use one of your existing reports.`
+    );
+
+    this.name = 'SmartBuddyReportLimitError';
+    this.status = 429;
+    this.code = 'SMART_BUDDY_REPORT_LIMIT_REACHED';
+    this.details = {
+      report_type: reportType,
+      limit,
+      used,
+      remaining: 0,
+    };
+  }
+}
+
 
 function clampNumber(value, fallback, min, max) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function getReportLimitPerType() {
+  return clampNumber(
+    process.env.SMART_BUDDY_REPORT_LIMIT_PER_TYPE,
+    DEFAULT_REPORT_LIMIT_PER_TYPE,
+    1,
+    MAX_REPORT_LIMIT_PER_TYPE
+  );
+}
+
+function normalizeReportType(value) {
+  const reportType = String(value || '')
+    .trim()
+    .toUpperCase();
+
+  if (!SMART_BUDDY_REPORT_TYPES.includes(reportType)) {
+    throw new Error(
+      `report_type is required and must be one of: ${SMART_BUDDY_REPORT_TYPES.join(', ')}`
+    );
+  }
+
+  return reportType;
+}
+
+function getReportTypeFromPayload(payload, reportData) {
+  return normalizeReportType(
+    payload.report_type ??
+      reportData?.report_type ??
+      reportData?.branch
+  );
+}
+
+function getStoredReportType(report) {
+  const value =
+    report?.report_type ??
+    report?.report_data?.report_type ??
+    report?.report_data?.branch;
+
+  const normalized = String(value || '')
+    .trim()
+    .toUpperCase();
+
+  return SMART_BUDDY_REPORT_TYPES.includes(normalized) ? normalized : null;
 }
 
 function toIsoDate(date) {
@@ -251,6 +324,7 @@ async function createReportSignedUrl(report, expiresIn = 60 * 30) {
 function reportResponse(report, signedUrl = null) {
   return {
     id: report.id,
+    report_type: getStoredReportType(report),
     report_title: report.report_title,
     file_name: report.file_name,
     mime_type: report.mime_type,
@@ -261,6 +335,109 @@ function reportResponse(report, signedUrl = null) {
   };
 }
 
+async function reserveReportSlot(studentId, reportType, reportId, limit) {
+  const { data, error } = await adminClient.rpc(
+    'reserve_student_buddy_report_slot',
+    {
+      p_student_id: studentId,
+      p_report_type: reportType,
+      p_report_id: reportId,
+      p_limit: limit,
+    }
+  );
+
+  if (error) {
+    throw new Error(
+      `Unable to reserve a Smart Buddy report slot. Run the Smart Buddy report-limit migration first. ${error.message}`
+    );
+  }
+
+  const reservation = Array.isArray(data) ? data[0] : data;
+
+  if (!reservation) {
+    const quota = await getSmartBuddyReportQuota(studentId, reportType);
+
+    throw new SmartBuddyReportLimitError({
+      reportType,
+      limit: quota.limit,
+      used: quota.used,
+    });
+  }
+
+  return reservation;
+}
+
+async function releaseReportSlot(reportId) {
+  const { error } = await adminClient.rpc(
+    'release_student_buddy_report_slot',
+    {
+      p_report_id: reportId,
+    }
+  );
+
+  if (error) {
+    console.warn(
+      'Unable to release Smart Buddy report slot:',
+      error.message
+    );
+  }
+}
+
+export async function getSmartBuddyReportQuota(studentId, requestedReportType) {
+  await assertStudentContext(studentId);
+
+  const limit = getReportLimitPerType();
+  const reportTypeFilter = requestedReportType
+    ? normalizeReportType(requestedReportType)
+    : null;
+
+  const { data: reports, error } = await adminClient
+    .from('student_buddy_reports')
+    .select('report_type, report_data')
+    .eq('student_id', studentId);
+
+  if (error) {
+    throw new Error(
+      `Unable to read Smart Buddy report quota. Run the Smart Buddy report-limit migration first. ${error.message}`
+    );
+  }
+
+  const usedByType = SMART_BUDDY_REPORT_TYPES.reduce((result, reportType) => {
+    result[reportType] = 0;
+    return result;
+  }, {});
+
+  for (const report of reports ?? []) {
+    const storedType = getStoredReportType(report);
+
+    if (storedType) {
+      usedByType[storedType] += 1;
+    }
+  }
+
+  const toQuota = (reportType) => {
+    const used = usedByType[reportType] ?? 0;
+
+    return {
+      report_type: reportType,
+      used,
+      limit,
+      remaining: Math.max(0, limit - used),
+      allowed: used < limit,
+    };
+  };
+
+  if (reportTypeFilter) {
+    return toQuota(reportTypeFilter);
+  }
+
+  return {
+    limit_per_type: limit,
+    quotas: SMART_BUDDY_REPORT_TYPES.map(toQuota),
+  };
+}
+
+
 export async function uploadSmartBuddyReport(studentId, file, payload = {}) {
   assertPdfFile(file);
 
@@ -268,8 +445,20 @@ export async function uploadSmartBuddyReport(studentId, file, payload = {}) {
   const reportData =
     parseJsonField(payload.report_data, 'report_data', MAX_REPORT_JSON_BYTES) ?? {};
 
+  const reportType = getReportTypeFromPayload(payload, reportData);
+  const reportLimit = getReportLimitPerType();
   const reportId = crypto.randomUUID();
   const now = new Date();
+
+  // Reserve one of the student's limited report slots before writing to Storage.
+  // The database function is atomic, so concurrent browser tabs cannot bypass the limit.
+  const reservation = await reserveReportSlot(
+    studentId,
+    reportType,
+    reportId,
+    reportLimit
+  );
+
   const fileName = sanitizeFileName(payload.file_name || file.originalname);
   const reportTitle = sanitizeTitle(payload.report_title);
   const storagePath = [
@@ -279,52 +468,73 @@ export async function uploadSmartBuddyReport(studentId, file, payload = {}) {
     `${reportId}.pdf`,
   ].join('/');
 
-  const { error: storageError } = await adminClient.storage
-    .from(SMART_BUDDY_REPORTS_BUCKET)
-    .upload(storagePath, file.buffer, {
-      contentType: 'application/pdf',
-      cacheControl: 'private, max-age=0, no-store',
-      upsert: false,
-    });
+  try {
+    const { error: storageError } = await adminClient.storage
+      .from(SMART_BUDDY_REPORTS_BUCKET)
+      .upload(storagePath, file.buffer, {
+        contentType: 'application/pdf',
+        cacheControl: 'private, max-age=0, no-store',
+        upsert: false,
+      });
 
-  if (storageError) {
-    throw new Error(
-      `Failed to store Smart Buddy PDF. Ensure bucket "${SMART_BUDDY_REPORTS_BUCKET}" exists and is private. ${storageError.message}`
-    );
-  }
+    if (storageError) {
+      throw new Error(
+        `Failed to store Smart Buddy PDF. Ensure bucket "${SMART_BUDDY_REPORTS_BUCKET}" exists and is private. ${storageError.message}`
+      );
+    }
 
-  const { data: report, error: reportError } = await adminClient
-    .from('student_buddy_reports')
-    .insert({
-      id: reportId,
-      student_id: studentId,
-      school_id: schoolId,
-      report_title: reportTitle,
-      report_data: reportData,
-      storage_bucket: SMART_BUDDY_REPORTS_BUCKET,
-      storage_path: storagePath,
-      file_name: fileName,
-      mime_type: 'application/pdf',
-      file_size: file.size ?? file.buffer.length,
-      generated_at: payload.generated_at
-        ? new Date(payload.generated_at).toISOString()
-        : toIsoDate(now),
-    })
-    .select(
-      'id, report_title, report_data, storage_bucket, storage_path, file_name, mime_type, file_size, generated_at, created_at'
-    )
-    .single();
+    const { data: report, error: reportError } = await adminClient
+      .from('student_buddy_reports')
+      .insert({
+        id: reportId,
+        student_id: studentId,
+        school_id: schoolId,
+        report_type: reportType,
+        report_title: reportTitle,
+        report_data: {
+          ...reportData,
+          report_type: reportType,
+        },
+        storage_bucket: SMART_BUDDY_REPORTS_BUCKET,
+        storage_path: storagePath,
+        file_name: fileName,
+        mime_type: 'application/pdf',
+        file_size: file.size ?? file.buffer.length,
+        generated_at: payload.generated_at
+          ? new Date(payload.generated_at).toISOString()
+          : toIsoDate(now),
+      })
+      .select(
+        'id, report_type, report_title, report_data, storage_bucket, storage_path, file_name, mime_type, file_size, generated_at, created_at'
+      )
+      .single();
 
-  if (reportError) {
+    if (reportError) {
+      throw new Error(reportError.message);
+    }
+
+    const signedUrl = await createReportSignedUrl(report);
+
+    return {
+      ...reportResponse(report, signedUrl),
+      quota: {
+        report_type: reportType,
+        used: Number(reservation.used ?? reportLimit),
+        limit: Number(reservation.limit_per_type ?? reportLimit),
+        remaining: Number(reservation.remaining ?? 0),
+        allowed: true,
+      },
+    };
+  } catch (error) {
+    // Remove any partially uploaded document and free the reservation.
     await adminClient.storage
       .from(SMART_BUDDY_REPORTS_BUCKET)
-      .remove([storagePath]);
+      .remove([storagePath])
+      .catch(() => undefined);
 
-    throw new Error(reportError.message);
+    await releaseReportSlot(reportId);
+    throw error;
   }
-
-  const signedUrl = await createReportSignedUrl(report);
-  return reportResponse(report, signedUrl);
 }
 
 export async function listSmartBuddyReports(studentId) {
@@ -333,7 +543,7 @@ export async function listSmartBuddyReports(studentId) {
   const { data: reports, error } = await adminClient
     .from('student_buddy_reports')
     .select(
-      'id, report_title, storage_bucket, storage_path, file_name, mime_type, file_size, generated_at, created_at'
+      'id, report_type, report_title, storage_bucket, storage_path, file_name, mime_type, file_size, generated_at, created_at'
     )
     .eq('student_id', studentId)
     .order('generated_at', { ascending: false });
@@ -355,7 +565,7 @@ export async function getSmartBuddyReportDownload(studentId, reportId) {
   const { data: report, error } = await adminClient
     .from('student_buddy_reports')
     .select(
-      'id, report_title, storage_bucket, storage_path, file_name, mime_type, file_size, generated_at, created_at'
+      'id, report_type, report_title, storage_bucket, storage_path, file_name, mime_type, file_size, generated_at, created_at'
     )
     .eq('id', reportId)
     .eq('student_id', studentId)

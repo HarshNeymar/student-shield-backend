@@ -11,6 +11,7 @@ import {
   createSmartBuddyLaunch,
   getSmartBuddyProfile,
   getSmartBuddyReportDownload,
+  getSmartBuddyReportQuota,
   listSmartBuddyReports,
   saveSmartBuddyProfile,
   uploadSmartBuddyReport,
@@ -452,6 +453,18 @@ router.get(
   asyncHandler(async (req, res) => {
     const reports = await listSmartBuddyReports(req.user.id);
     res.json(reports);
+  })
+);
+
+router.get(
+  '/smart-buddy/reports/quota',
+  asyncHandler(async (req, res) => {
+    const quota = await getSmartBuddyReportQuota(
+      req.user.id,
+      req.query.report_type
+    );
+
+    res.json(quota);
   })
 );
 

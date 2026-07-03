@@ -80,11 +80,18 @@ app.use((err, _req, res, _next) => {
 
   const message = err?.message ?? 'Internal server error';
 
-  const status = message.toLowerCase().startsWith('forbidden')
-    ? 403
-    : 500;
+  const status =
+    Number.isInteger(err?.status) && err.status >= 400 && err.status < 600
+      ? err.status
+      : message.toLowerCase().startsWith('forbidden')
+        ? 403
+        : 500;
 
-  res.status(status).json({ error: message });
+  res.status(status).json({
+    error: message,
+    ...(err?.code ? { code: err.code } : {}),
+    ...(err?.details ? { details: err.details } : {}),
+  });
 });
 
 const port = Number(process.env.PORT ?? 4000);

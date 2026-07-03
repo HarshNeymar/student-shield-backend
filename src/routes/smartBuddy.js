@@ -6,6 +6,7 @@ import {
   exchangeSmartBuddyLaunchToken,
   getSmartBuddyProfile,
   getSmartBuddyReportDownload,
+  getSmartBuddyReportQuota,
   listSmartBuddyReports,
   revokeSmartBuddySession,
   saveSmartBuddyProfile,
@@ -66,6 +67,18 @@ router.get(
   asyncHandler(async (req, res) => {
     const reports = await listSmartBuddyReports(req.smartBuddy.studentId);
     res.json(reports);
+  })
+);
+
+router.get(
+  '/reports/quota',
+  asyncHandler(async (req, res) => {
+    const quota = await getSmartBuddyReportQuota(
+      req.smartBuddy.studentId,
+      req.query.report_type
+    );
+
+    res.json(quota);
   })
 );
 
