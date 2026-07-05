@@ -16,6 +16,7 @@ import {
   saveSmartBuddyProfile,
   uploadSmartBuddyReport,
 } from '../services/smartBuddy.js';
+import { buildEnrollmentReceiptSummary } from '../services/enrollmentDocument.js';
 const router = Router();
 
 const upload = multer({
@@ -252,12 +253,20 @@ router.get(
       console.warn('Student claims count error:', claimsCountError.message);
     }
 
+    const receipt = buildEnrollmentReceiptSummary({
+  student: profile,
+  school,
+  enrollment,
+  payments,
+});
+
     res.json({
       profile,
       school,
       teacher,
       enrollment,
       payments,
+      receipt,
       pendingInstallment,
       secondInstallment: pendingInstallment
         ? {

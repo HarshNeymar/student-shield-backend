@@ -13,6 +13,7 @@ import studentRoutes from './routes/student.js';
 import teacherRoutes from './routes/teacher.js';
 import smartBuddyRoutes from './routes/smartBuddy.js';
 import whatsappWebhookRoutes from './routes/whatsappWebhook.js';
+import enrollmentDocumentRoutes from './routes/enrollmentDocuments.js';
 const app = express();
 
 /*
@@ -74,7 +75,7 @@ app.use('/api/teacher', requireAuth, teacherRoutes);
 
 // Smart Buddy uses its own scoped launch/session token.
 app.use('/api/smart-buddy', smartBuddyRoutes);
-
+app.use('/api/documents', requireAuth, enrollmentDocumentRoutes);
 app.use((err, _req, res, _next) => {
   console.error(err);
 

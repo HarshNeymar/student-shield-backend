@@ -249,6 +249,7 @@ function buildReceipt({
   paidAmount,
   remainingAmount,
   installmentDates,
+  benefitExpiryDate,
 }) {
   const benefitStartDate = new Date().toISOString().slice(0, 10);
 
