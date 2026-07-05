@@ -1,8 +1,8 @@
 import { adminClient } from '../supabase.js';
 import {
-  buildStudentEnrollmentWhatsAppMessage,
-  sendWhatsAppTextMessage,
-} from './whatsapp.js';
+  buildStudentEnrollmentSmsMessage,
+  sendSmsTextMessage,
+} from './sms.js';
 export async function getCallerRoles(callerId) {
   const { data, error } = await adminClient
     .from('user_roles')
@@ -657,43 +657,73 @@ export async function createStudent(callerId, body) {
     benefitExpiryDate: benefitExpiryDateOnly,
   });
 
-  const whatsappPayload = buildStudentEnrollmentWhatsAppMessage({
-    parentPhone: body.parent_phone,
-    schoolName,
-    studentName: body.full_name,
-    classAssigned,
-    planTier,
-    planDuration,
-    amount,
-    paymentMode,
-    paymentType,
-    paidAmount: finalPaidAmount,
-    remainingAmount: finalRemainingAmount,
-    installmentDates,
-    receipt,
-    loginEmail: email,
-    password: body.password,
-  });
+  // const whatsappPayload = buildStudentEnrollmentWhatsAppMessage({
+  //   parentPhone: body.parent_phone,
+  //   schoolName,
+  //   studentName: body.full_name,
+  //   classAssigned,
+  //   planTier,
+  //   planDuration,
+  //   amount,
+  //   paymentMode,
+  //   paymentType,
+  //   paidAmount: finalPaidAmount,
+  //   remainingAmount: finalRemainingAmount,
+  //   installmentDates,
+  //   receipt,
+  //   loginEmail: email,
+  //   password: body.password,
+  // });
 
-  const whatsappSendResult = await sendWhatsAppTextMessage({
-    to: whatsappPayload.to,
-    message: whatsappPayload.message,
-  });
+  // const whatsappSendResult = await sendWhatsAppTextMessage({
+  //   to: whatsappPayload.to,
+  //   message: whatsappPayload.message,
+  // });
 
-  const whatsapp = {
-    status: whatsappSendResult.sent ? 'sent' : 'failed',
-    to: whatsappPayload.to,
-    message: whatsappPayload.message,
-    provider_response: whatsappSendResult,
-  };
+  // const whatsapp = {
+  //   status: whatsappSendResult.sent ? 'sent' : 'failed',
+  //   to: whatsappPayload.to,
+  //   message: whatsappPayload.message,
+  //   provider_response: whatsappSendResult,
+  // };
 
-  return {
-    success: true,
-    student_id: studentId,
-    email,
-    receipt,
-    whatsapp,
-  };
+
+  const smsPayload = buildStudentEnrollmentSmsMessage({
+  parentPhone: body.parent_phone,
+  schoolName,
+  studentName: body.full_name,
+  planTier,
+  planDuration,
+  amount,
+  paidAmount: finalPaidAmount,
+  remainingAmount: finalRemainingAmount,
+  loginEmail: email,
+});
+
+const smsSendResult = await sendSmsTextMessage({
+  to: smsPayload.to,
+  message: smsPayload.message,
+});
+
+const sms = {
+  channel: 'sms',
+  status: smsSendResult.sent
+    ? 'sent'
+    : smsSendResult.skipped
+      ? 'skipped'
+      : 'failed',
+  to: smsPayload.to,
+  message: smsPayload.message,
+  provider_response: smsSendResult,
+};
+
+return {
+  success: true,
+  student_id: studentId,
+  email,
+  receipt,
+  sms,
+};
 }
 
 export async function payPendingStudentFees(callerId, studentId) {
