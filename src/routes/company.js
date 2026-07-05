@@ -77,6 +77,181 @@ function parseBoolean(value) {
   );
 }
 
+function normalizeMeetingUrl(value) {
+  const rawUrl = String(value ?? '').trim();
+
+  if (!rawUrl) {
+    return null;
+  }
+
+  const urlWithProtocol = /^https?:\/\//i.test(rawUrl)
+    ? rawUrl
+    : `https://${rawUrl}`;
+
+  let parsedUrl;
+
+  try {
+    parsedUrl = new URL(urlWithProtocol);
+  } catch {
+    const err = new Error(
+      'Meeting URL must be a valid http:// or https:// link'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+    const err = new Error(
+      'Meeting URL must start with http:// or https://'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  return parsedUrl.toString();
+}
+
+async function prepareSessionPayload(form) {
+  const schoolId = String(form.target_school_id ?? '').trim();
+  const title = String(form.title ?? '').trim();
+  const scheduledAt = String(form.scheduled_at ?? '').trim();
+  const durationMinutes = Number(form.duration_minutes ?? 30);
+
+  if (!title) {
+    const err = new Error('Session title is required');
+    err.status = 400;
+    throw err;
+  }
+
+  if (!schoolId) {
+    const err = new Error(
+      'Please select a school for this counseling session'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  if (!scheduledAt || Number.isNaN(new Date(scheduledAt).getTime())) {
+    const err = new Error('Please provide a valid session date and time');
+    err.status = 400;
+    throw err;
+  }
+
+  if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+    const err = new Error('Duration must be greater than 0 minutes');
+    err.status = 400;
+    throw err;
+  }
+
+  const { data: school, error: schoolError } = await adminClient
+    .from('schools')
+    .select('id')
+    .eq('id', schoolId)
+    .maybeSingle();
+
+  if (schoolError) {
+    throw new Error(schoolError.message);
+  }
+
+  if (!school) {
+    const err = new Error('Selected school was not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const classesForSchool = await getSchoolClassOptions(schoolId);
+
+  if (!classesForSchool.length) {
+    const err = new Error(
+      'No classes are available for this school. Create a teacher or student with a class first.'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const selectAllClasses = parseBoolean(form.target_all_classes);
+
+  let selectedClasses = parseTargetClasses(form.target_classes);
+
+  if (!selectAllClasses && !selectedClasses.length) {
+    selectedClasses = parseTargetClasses(form.target_class);
+  }
+
+  if (!selectAllClasses && !selectedClasses.length) {
+    const err = new Error(
+      'Select one or more classes, or choose All classes'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const invalidClasses = selectedClasses.filter(
+    (className) => !classesForSchool.includes(className)
+  );
+
+  if (invalidClasses.length) {
+    const err = new Error(
+      `These classes do not belong to the selected school: ${invalidClasses.join(', ')}`
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  // Empty array means all classes of the selected school.
+  const targetClasses = selectAllClasses ? [] : selectedClasses;
+
+  return {
+    title,
+    description: String(form.description ?? '').trim() || null,
+    target_school_id: schoolId,
+    target_class: targetClasses.length === 1 ? targetClasses[0] : null,
+    target_classes: targetClasses,
+    scheduled_at: scheduledAt,
+    duration_minutes: Math.round(durationMinutes),
+    meeting_url: normalizeMeetingUrl(form.meeting_url),
+  };
+}
+
+async function uploadSessionRecording(schoolId, file) {
+  if (!file) {
+    return null;
+  }
+
+  const mimeType = String(file.mimetype ?? '');
+
+  if (
+    !mimeType.startsWith('video/') &&
+    !mimeType.startsWith('audio/')
+  ) {
+    const err = new Error(
+      'Recording file must be an audio or video file'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const fileName = String(file.originalname ?? 'recording')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .slice(-120);
+
+  const storagePath = `${schoolId}/${Date.now()}-${
+    fileName || 'recording'
+  }`;
+
+  const { error } = await adminClient.storage
+    .from('session-recordings')
+    .upload(storagePath, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false,
+    });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return storagePath;
+}
+
 async function getSchoolClassOptions(schoolId) {
   const { data, error } = await adminClient
     .from('profiles')
@@ -938,115 +1113,129 @@ router.post(
   asyncHandler(async (req, res) => {
     await assertCompanyAdmin(req);
 
-    const form = req.body;
-    const schoolId = String(form.target_school_id ?? '').trim();
+    const payload = await prepareSessionPayload(req.body);
 
-    if (!schoolId) {
-      return res.status(400).json({
-        error: 'Please select a school for this counseling session',
-      });
-    }
-
-    const { data: school, error: schoolError } = await adminClient
-      .from('schools')
-      .select('id')
-      .eq('id', schoolId)
-      .maybeSingle();
-
-    if (schoolError) {
-      throw new Error(schoolError.message);
-    }
-
-    if (!school) {
-      return res.status(404).json({
-        error: 'Selected school was not found',
-      });
-    }
-
-    const classesForSchool = await getSchoolClassOptions(schoolId);
-
-    if (!classesForSchool.length) {
-      return res.status(400).json({
-        error:
-          'No classes are available for this school. Create a teacher or student with a class first.',
-      });
-    }
-
-    const selectAllClasses = parseBoolean(form.target_all_classes);
-
-    let selectedClasses = parseTargetClasses(form.target_classes);
-
-    // Supports old frontend submitting one target_class.
-    if (!selectAllClasses && !selectedClasses.length) {
-      selectedClasses = parseTargetClasses(form.target_class);
-    }
-
-    if (!selectAllClasses && !selectedClasses.length) {
-      return res.status(400).json({
-        error: 'Select one or more classes, or choose All classes',
-      });
-    }
-
-    const invalidClasses = selectedClasses.filter(
-      (className) => !classesForSchool.includes(className)
+    const recordingUrl = await uploadSessionRecording(
+      payload.target_school_id,
+      req.file
     );
-
-    if (invalidClasses.length) {
-      return res.status(400).json({
-        error: `These classes do not belong to the selected school: ${invalidClasses.join(', ')}`,
-      });
-    }
-
-    // Empty target_classes means All classes for this school.
-    const targetClasses = selectAllClasses ? [] : selectedClasses;
-
-    let recording_url = null;
-
-    if (req.file) {
-      const path = `${schoolId}/${Date.now()}-${req.file.originalname}`;
-
-      const { error } = await adminClient.storage
-        .from('session-recordings')
-        .upload(path, req.file.buffer, {
-          contentType: req.file.mimetype,
-          upsert: false,
-        });
-
-      if (error) {
-        throw new Error(error.message);
-      }
-
-      recording_url = path;
-    }
 
     const { data, error } = await adminClient
       .from('sessions')
       .insert({
-        title: form.title,
-        description: form.description || null,
-        target_school_id: schoolId,
-
-        // Backward compatibility for old single-class data.
-        target_class:
-          targetClasses.length === 1 ? targetClasses[0] : null,
-
-        target_classes: targetClasses,
-        scheduled_at: form.scheduled_at,
-        duration_minutes: Number(form.duration_minutes || 30),
-        meeting_url: form.meeting_url || null,
-        recording_url,
+        ...payload,
+        recording_url: recordingUrl,
         created_by: req.user.id,
       })
       .select()
       .single();
 
     if (error) {
+      if (recordingUrl) {
+        await adminClient.storage
+          .from('session-recordings')
+          .remove([recordingUrl]);
+      }
+
       throw new Error(error.message);
     }
 
+    const targetClasses = sessionTargetClasses(data);
+
     res.status(201).json({
       ...data,
-      target_classes: sessionTargetClasses(data),
+      target_classes: targetClasses,
+      target_class_scope:
+        targetClasses.length === 0 ? 'all' : 'selected',
+    });
+  })
+);
+
+router.patch(
+  '/sessions/:sessionId',
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    await assertCompanyAdmin(req);
+
+    const sessionId = String(req.params.sessionId ?? '').trim();
+
+    if (!sessionId) {
+      return res.status(400).json({
+        error: 'Missing session id',
+      });
+    }
+
+    const { data: existingSession, error: existingError } =
+      await adminClient
+        .from('sessions')
+        .select('id, recording_url')
+        .eq('id', sessionId)
+        .maybeSingle();
+
+    if (existingError) {
+      throw new Error(existingError.message);
+    }
+
+    if (!existingSession) {
+      return res.status(404).json({
+        error: 'Session not found',
+      });
+    }
+
+    const payload = await prepareSessionPayload(req.body);
+
+    const uploadedRecordingPath = await uploadSessionRecording(
+      payload.target_school_id,
+      req.file
+    );
+
+    // If no new file is selected, keep the existing recording.
+    const recordingUrl =
+      uploadedRecordingPath ?? existingSession.recording_url;
+
+    const { data, error } = await adminClient
+      .from('sessions')
+      .update({
+        ...payload,
+        recording_url: recordingUrl,
+      })
+      .eq('id', sessionId)
+      .select()
+      .single();
+
+    if (error) {
+      if (uploadedRecordingPath) {
+        await adminClient.storage
+          .from('session-recordings')
+          .remove([uploadedRecordingPath]);
+      }
+
+      throw new Error(error.message);
+    }
+
+    // Remove the old recording only after DB update succeeds.
+    if (
+      uploadedRecordingPath &&
+      existingSession.recording_url &&
+      existingSession.recording_url !== uploadedRecordingPath
+    ) {
+      const { error: removeError } = await adminClient.storage
+        .from('session-recordings')
+        .remove([existingSession.recording_url]);
+
+      if (removeError) {
+        console.warn(
+          `Could not remove replaced session recording ${existingSession.recording_url}:`,
+          removeError.message
+        );
+      }
+    }
+
+    const targetClasses = sessionTargetClasses(data);
+
+    res.json({
+      ...data,
+      target_classes: targetClasses,
       target_class_scope:
         targetClasses.length === 0 ? 'all' : 'selected',
     });
