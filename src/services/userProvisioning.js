@@ -1,8 +1,8 @@
 import { adminClient } from '../supabase.js';
 import {
-  buildStudentEnrollmentSmsMessage,
-  sendSmsTextMessage,
-} from './sms.js';
+  buildStudentEnrollmentWhatsAppTemplate,
+  sendWhatsAppTemplateMessage,
+} from './whatsapp.js';
 export async function getCallerRoles(callerId) {
   const { data, error } = await adminClient
     .from('user_roles')
@@ -688,34 +688,32 @@ export async function createStudent(callerId, body) {
   //   provider_response: whatsappSendResult,
   // };
 
-
-  const smsPayload = buildStudentEnrollmentSmsMessage({
+const whatsappPayload = buildStudentEnrollmentWhatsAppTemplate({
   parentPhone: body.parent_phone,
-  schoolName,
   studentName: body.full_name,
+  schoolName,
   planTier,
-  planDuration,
-  amount,
-  paidAmount: finalPaidAmount,
-  remainingAmount: finalRemainingAmount,
   loginEmail: email,
 });
 
-const smsSendResult = await sendSmsTextMessage({
-  to: smsPayload.to,
-  message: smsPayload.message,
+const whatsappSendResult = await sendWhatsAppTemplateMessage({
+  to: whatsappPayload.to,
+  templateName: whatsappPayload.templateName,
+  languageCode: whatsappPayload.languageCode,
+  bodyParameters: whatsappPayload.bodyParameters,
 });
 
-const sms = {
-  channel: 'sms',
-  status: smsSendResult.sent
-    ? 'sent'
-    : smsSendResult.skipped
+const whatsapp = {
+  channel: 'whatsapp',
+  status: whatsappSendResult.sent
+    ? 'accepted'
+    : whatsappSendResult.skipped
       ? 'skipped'
       : 'failed',
-  to: smsPayload.to,
-  message: smsPayload.message,
-  provider_response: smsSendResult,
+  to: whatsappPayload.to,
+  template: whatsappPayload.templateName,
+  message_id: whatsappSendResult.message_id ?? null,
+  provider_response: whatsappSendResult,
 };
 
 return {
@@ -723,8 +721,9 @@ return {
   student_id: studentId,
   email,
   receipt,
-  sms,
+  whatsapp,
 };
+
 }
 
 export async function payPendingStudentFees(callerId, studentId) {

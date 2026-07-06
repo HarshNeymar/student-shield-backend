@@ -1,117 +1,68 @@
-function normalizeIndianPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
+function normalizeWhatsAppRecipient(phone) {
+  const digits = String(phone ?? '').replace(/\D/g, '');
 
   if (!digits) return null;
 
-  // If 10 digit Indian number, prefix 91
-  if (digits.length === 10) {
+  // Indian local mobile: 9322677248 -> 919322677248
+  if (/^[6-9]\d{9}$/.test(digits)) {
     return `91${digits}`;
   }
 
-  // If already has country code
-  return digits;
+  // Supports input such as 0091XXXXXXXXXX
+  const normalized = digits.startsWith('00') ? digits.slice(2) : digits;
+
+  return /^\d{8,15}$/.test(normalized) ? normalized : null;
 }
 
-function formatMoney(value) {
-  return `₹${Number(value || 0).toLocaleString('en-IN')}`;
+function textValue(value, fallback = '-') {
+  const text = String(value ?? '').trim();
+  return text || fallback;
 }
 
-function paymentTypeLabel(type) {
+function planLabel(planTier) {
   const labels = {
-    one_time: 'One-Time Payment',
-    installment: 'Installment Payment',
-    paid_with_fees: 'Paid with School Fees',
+    basic: 'Basic',
+    standard: 'Standard',
+    premium: 'Premium',
   };
 
-  return labels[type] || type || 'Payment';
+  return labels[String(planTier ?? '').toLowerCase()] || 'Plan';
 }
 
-function planLabel(plan) {
-  const labels = {
-    basic: 'Basic Plan',
-    standard: 'Standard Plan',
-    premium: 'Premium Plan',
-  };
-
-  return labels[plan] || plan || 'Plan';
-}
-
-export function buildStudentEnrollmentWhatsAppMessage({
+export function buildStudentEnrollmentWhatsAppTemplate({
   parentPhone,
-  schoolName,
   studentName,
-  classAssigned,
+  schoolName,
   planTier,
-  planDuration,
-  amount,
-  paymentMode,
-  paymentType,
-  paidAmount,
-  remainingAmount,
-  installmentDates = [],
-  receipt,
   loginEmail,
-  password,
 }) {
-  const appUrl = process.env.STUDENT_APP_URL || 'Student Shield app';
-
-  const lines = [
-    `🎓 *Student Shield Enrollment Confirmation*`,
-    ``,
-    `Dear Parent,`,
-    ``,
-    `Your child has been enrolled successfully in *Student Shield*.`,
-    ``,
-    `*Student Details*`,
-    `Name: ${studentName}`,
-    `Class: ${classAssigned || '-'}`,
-    `School: ${schoolName}`,
-    ``,
-    `*Plan Details*`,
-    `Plan: ${planLabel(planTier)}`,
-    `Duration: ${planDuration || 'yearly'}`,
-    `Total Fees: ${formatMoney(amount)}`,
-    ``,
-    `*Payment Details*`,
-    `Payment Type: ${paymentTypeLabel(paymentType)}`,
-    `Payment Mode: ${paymentMode || '-'}`,
-    `Paid Amount: ${formatMoney(paidAmount)}`,
-    `Pending Amount: ${formatMoney(remainingAmount)}`,
-  ];
-
-  if (paymentType === 'installment') {
-    lines.push(
-      ``,
-      `*Installment Details*`,
-      `1st Installment: ${formatMoney(paidAmount)} - Paid`,
-      `2nd Installment: ${formatMoney(remainingAmount)} - Pending`,
-      `1st Date: ${installmentDates?.[0] || '-'}`,
-      `2nd Due Date: ${installmentDates?.[1] || '-'}`
-    );
-  }
-
-  lines.push(
-    ``,
-    `*Receipt*`,
-    `Receipt No: ${receipt?.receipt_no || receipt?.receiptNo || '-'}`,
-    ``,
-    `*Student Login Details*`,
-    `Login Email: ${loginEmail}`,
-    `Password: ${password}`,
-    ``,
-    `App Link: ${appUrl}`,
-    ``,
-    `Thank you,`,
-    `*${schoolName} / Student Shield Team*`
-  );
-
   return {
-    to: normalizeIndianPhone(parentPhone),
-    message: lines.join('\n'),
+    to: normalizeWhatsAppRecipient(parentPhone),
+
+    templateName:
+      process.env.WHATSAPP_STUDENT_ENROLLMENT_TEMPLATE?.trim() ||
+      'student_enrollment_confirmation',
+
+    languageCode:
+      process.env.WHATSAPP_STUDENT_ENROLLMENT_TEMPLATE_LANGUAGE?.trim() ||
+      'en_US',
+
+    // Must match {{1}}, {{2}}, {{3}}, {{4}} in Meta template body.
+    bodyParameters: [
+      textValue(studentName),
+      textValue(schoolName),
+      planLabel(planTier),
+      textValue(loginEmail),
+    ],
   };
 }
 
-export async function sendWhatsAppTextMessage({ to, message }) {
+export async function sendWhatsAppTemplateMessage({
+  to,
+  templateName,
+  languageCode,
+  bodyParameters = [],
+}) {
   if (process.env.WHATSAPP_ENABLED !== 'true') {
     return {
       sent: false,
@@ -120,15 +71,16 @@ export async function sendWhatsAppTextMessage({ to, message }) {
     };
   }
 
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  const apiVersion = process.env.WHATSAPP_API_VERSION || 'v20.0';
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN?.trim();
+  const apiVersion = process.env.WHATSAPP_API_VERSION?.trim();
 
-  if (!phoneNumberId || !accessToken) {
+  if (!phoneNumberId || !accessToken || !apiVersion) {
     return {
       sent: false,
       skipped: true,
-      reason: 'WhatsApp credentials missing',
+      reason:
+        'WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN, or WHATSAPP_API_VERSION is missing',
     };
   }
 
@@ -136,43 +88,76 @@ export async function sendWhatsAppTextMessage({ to, message }) {
     return {
       sent: false,
       skipped: true,
-      reason: 'Parent phone number missing',
+      reason: 'Parent WhatsApp number is missing or invalid',
     };
   }
 
-  const url = `https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: {
-        preview_url: false,
-        body: message,
-      },
-    }),
-  });
-
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
+  if (!templateName) {
     return {
       sent: false,
-      error: data?.error?.message || 'WhatsApp send failed',
-      raw: data,
+      skipped: true,
+      reason: 'WhatsApp template name is missing',
     };
   }
 
-  return {
-    sent: true,
-    to,
-    message_id: data?.messages?.[0]?.id ?? null,
-    raw: data,
-  };
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'template',
+          template: {
+            name: templateName,
+            language: {
+              code: languageCode,
+            },
+            components: [
+              {
+                type: 'body',
+                parameters: bodyParameters.map((value) => ({
+                  type: 'text',
+                  text: textValue(value),
+                })),
+              },
+            ],
+          },
+        }),
+      }
+    );
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      return {
+        sent: false,
+        to,
+        error: data?.error?.message || 'WhatsApp template send failed',
+        code: data?.error?.code ?? null,
+        error_subcode: data?.error?.error_subcode ?? null,
+        raw: data,
+      };
+    }
+
+    return {
+      sent: true,
+      accepted: true,
+      to,
+      message_id: data?.messages?.[0]?.id ?? null,
+      status: data?.messages?.[0]?.message_status || 'accepted',
+    };
+  } catch (error) {
+    return {
+      sent: false,
+      to,
+      error: error?.message || 'WhatsApp request failed',
+    };
+  }
 }
