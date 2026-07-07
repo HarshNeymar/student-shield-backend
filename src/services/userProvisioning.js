@@ -690,10 +690,44 @@ export async function createStudent(callerId, body) {
 
 const whatsappPayload = buildStudentEnrollmentWhatsAppTemplate({
   parentPhone: body.parent_phone,
+
+  // Falls back to student name when parent/guardian name is not captured.
+  parentName:
+    body.parent_name ||
+    body.parentName ||
+    body.guardian_name ||
+    body.guardianName ||
+    body.full_name,
+
   studentName: body.full_name,
   schoolName,
+  classAssigned,
+
   planTier,
+  planDuration,
   loginEmail: email,
+
+  amount,
+  paidAmount: finalPaidAmount,
+
+  // Uses an optional request value; otherwise uses today's enrollment date.
+  paidOn:
+    body.payment_date ||
+    body.paid_on ||
+    body.paid_date ||
+    new Date(),
+
+  remainingAmount: finalRemainingAmount,
+
+  // Uses explicit due date first, then first installment date.
+  dueDate:
+    body.due_date ||
+    body.dueDate ||
+    body.next_due_date ||
+    body.nextDueDate ||
+    null,
+
+  installmentDates,
 });
 
 const whatsappSendResult = await sendWhatsAppTemplateMessage({

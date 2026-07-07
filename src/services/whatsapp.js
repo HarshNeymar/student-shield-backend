@@ -34,7 +34,133 @@ function planLabel(planTier) {
     premium: 'Premium',
   };
 
-  return labels[String(planTier ?? '').toLowerCase()] || 'Plan';
+  const value = String(planTier ?? '').trim();
+
+  if (!value) return 'Plan';
+
+  return labels[value.toLowerCase()] || value;
+}
+
+function formatAmount(value) {
+  const amount = Number(value || 0);
+
+  return new Intl.NumberFormat('en-IN', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(amount) ? amount : 0);
+}
+
+function formatTemplateDate(value, fallback = 'Not available') {
+  if (!value) return fallback;
+
+  const text = String(value).trim();
+
+  // Keeps YYYY-MM-DD dates stable without timezone shifting.
+  const dateOnlyMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (dateOnlyMatch) {
+    const [, year, month, day] = dateOnlyMatch;
+    return `${day}-${month}-${year}`;
+  }
+
+  const date = new Date(text);
+
+  if (Number.isNaN(date.getTime())) {
+    return text || fallback;
+  }
+
+  return new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata',
+  }).format(date).replace(/\//g, '-');
+}
+
+function getFirstInstallmentDate(installmentDates) {
+  if (!installmentDates) return null;
+
+  if (Array.isArray(installmentDates)) {
+    return installmentDates.find(Boolean) || null;
+  }
+
+  if (typeof installmentDates === 'string') {
+    try {
+      const parsed = JSON.parse(installmentDates);
+
+      if (Array.isArray(parsed)) {
+        return parsed.find(Boolean) || null;
+      }
+    } catch {
+      return installmentDates.split(',').map((item) => item.trim()).find(Boolean) || null;
+    }
+  }
+
+  return null;
+}
+
+function getDueDate({ dueDate, installmentDates, remainingAmount }) {
+  if (Number(remainingAmount || 0) <= 0) {
+    return 'Not applicable';
+  }
+
+  return formatTemplateDate(
+    dueDate || getFirstInstallmentDate(installmentDates),
+    'To be confirmed'
+  );
+}
+
+export function buildStudentEnrollmentWhatsAppTemplate({
+  parentPhone,
+  parentName,
+  studentName,
+  schoolName,
+  classAssigned,
+  planTier,
+  planDuration,
+  loginEmail,
+  amount,
+  paidAmount,
+  paidOn,
+  remainingAmount,
+  dueDate,
+  installmentDates,
+}) {
+  const planText = [
+    planLabel(planTier),
+    planDuration ? `(${planDuration})` : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return {
+    to: normalizeWhatsAppRecipient(parentPhone),
+
+    templateName:
+      process.env.WHATSAPP_STUDENT_ENROLLMENT_TEMPLATE?.trim() ||
+      'student_enrollment_payment_details',
+
+    languageCode:
+      process.env.WHATSAPP_STUDENT_ENROLLMENT_TEMPLATE_LANGUAGE?.trim() ||
+      'en',
+
+    // Must match {{1}} to {{11}} in the approved Meta template.
+    bodyParameters: [
+      textValue(parentName || studentName),                         // {{1}}
+      textValue(studentName),                                      // {{2}}
+      textValue(schoolName),                                       // {{3}}
+      textValue(classAssigned),                                    // {{4}}
+      textValue(loginEmail),                                       // {{5}}
+      textValue(planText),                                         // {{6}}
+      formatAmount(amount),                                        // {{7}}
+      formatAmount(paidAmount),                                    // {{8}}
+      Number(paidAmount || 0) > 0
+        ? formatTemplateDate(paidOn, formatTemplateDate(new Date()))
+        : 'Not paid',                                              // {{9}}
+      formatAmount(remainingAmount),                               // {{10}}
+      getDueDate({ dueDate, installmentDates, remainingAmount }),  // {{11}}
+    ],
+  };
 }
 
 function getWhatsAppConfig() {
@@ -106,34 +232,6 @@ async function metaRequest({ config, path, method = 'GET', body }) {
     ok: response.ok,
     status: response.status,
     data,
-  };
-}
-
-export function buildStudentEnrollmentWhatsAppTemplate({
-  parentPhone,
-  studentName,
-  schoolName,
-  planTier,
-  loginEmail,
-}) {
-  return {
-    to: normalizeWhatsAppRecipient(parentPhone),
-
-    templateName:
-      process.env.WHATSAPP_STUDENT_ENROLLMENT_TEMPLATE?.trim() ||
-      'student_enrollment_confirmation',
-
-    languageCode:
-      process.env.WHATSAPP_STUDENT_ENROLLMENT_TEMPLATE_LANGUAGE?.trim() ||
-      'en_US',
-
-    // Must match {{1}}, {{2}}, {{3}}, {{4}} in your Meta template.
-    bodyParameters: [
-      textValue(studentName),
-      textValue(schoolName),
-      planLabel(planTier),
-      textValue(loginEmail),
-    ],
   };
 }
 
