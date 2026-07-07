@@ -77,26 +77,50 @@ function formatTemplateDate(value, fallback = 'Not available') {
   }).format(date).replace(/\//g, '-');
 }
 
-function getFirstInstallmentDate(installmentDates) {
-  if (!installmentDates) return null;
+function getInstallmentDates(installmentDates) {
+  if (!installmentDates) return [];
 
-  if (Array.isArray(installmentDates)) {
-    return installmentDates.find(Boolean) || null;
-  }
+  let parsed = installmentDates;
 
   if (typeof installmentDates === 'string') {
     try {
-      const parsed = JSON.parse(installmentDates);
-
-      if (Array.isArray(parsed)) {
-        return parsed.find(Boolean) || null;
-      }
+      parsed = JSON.parse(installmentDates);
     } catch {
-      return installmentDates.split(',').map((item) => item.trim()).find(Boolean) || null;
+      parsed = installmentDates
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
     }
   }
 
-  return null;
+  const values = Array.isArray(parsed) ? parsed : [parsed];
+
+  return values
+    .map((item) => {
+      if (!item) return null;
+
+      // Supports plain date strings and object-based installment records.
+      if (typeof item === 'object') {
+        return (
+          item.due_date ||
+          item.dueDate ||
+          item.installment_date ||
+          item.installmentDate ||
+          item.date ||
+          null
+        );
+      }
+
+      return String(item).trim();
+    })
+    .filter(Boolean);
+}
+
+function getSecondInstallmentDate(installmentDates) {
+  const dates = getInstallmentDates(installmentDates);
+
+  // Index 1 = second installment date.
+  return dates[1] || null;
 }
 
 function getDueDate({ dueDate, installmentDates, remainingAmount }) {
@@ -104,8 +128,11 @@ function getDueDate({ dueDate, installmentDates, remainingAmount }) {
     return 'Not applicable';
   }
 
+  // Prefer the second installment date for pending payment.
+  const secondInstallmentDate = getSecondInstallmentDate(installmentDates);
+
   return formatTemplateDate(
-    dueDate || getFirstInstallmentDate(installmentDates),
+    secondInstallmentDate || dueDate,
     'To be confirmed'
   );
 }
