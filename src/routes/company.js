@@ -58,6 +58,43 @@ function parseTargetClasses(value) {
     ),
   ];
 }
+function addYears(date, years) {
+  const next = new Date(date);
+  next.setFullYear(next.getFullYear() + years);
+  return next;
+}
+
+function resolveSchoolBenefitsDates(body = {}) {
+  const now = new Date();
+
+  const startedAt =
+    body.benefits_started_at ||
+    body.benefitsStartedAt ||
+    now.toISOString();
+
+  const expiresAt =
+    body.benefits_expires_at ||
+    body.benefitsExpiresAt ||
+    body.plan_expires_at ||
+    body.planExpiresAt ||
+    addYears(new Date(startedAt), 1).toISOString();
+
+  return {
+    benefits_started_at: startedAt,
+    benefits_expires_at: expiresAt,
+  };
+}
+
+function normalizeSchoolPlanTier(value) {
+  const plan = String(value ?? 'basic').trim().toLowerCase();
+
+  if (['basic', 'standard', 'premium'].includes(plan)) {
+    return plan;
+  }
+
+  return 'basic';
+}
+
 
 function sessionTargetClasses(session) {
   const fromNewColumn = parseTargetClasses(session?.target_classes);
@@ -810,9 +847,22 @@ router.post(
   asyncHandler(async (req, res) => {
     await assertCompanyAdmin(req);
 
+    const benefitsDates = resolveSchoolBenefitsDates(req.body);
+
+    const payload = {
+      ...req.body,
+
+      selected_plan_tier: normalizeSchoolPlanTier(
+        req.body.selected_plan_tier ?? req.body.plan_tier ?? req.body.plan
+      ),
+
+      benefits_started_at: benefitsDates.benefits_started_at,
+      benefits_expires_at: benefitsDates.benefits_expires_at,
+    };
+
     const { data, error } = await adminClient
       .from('schools')
-      .insert(req.body)
+      .insert(payload)
       .select()
       .single();
 

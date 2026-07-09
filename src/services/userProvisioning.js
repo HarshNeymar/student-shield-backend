@@ -433,12 +433,27 @@ export async function createStudent(callerId, body) {
     throw new Error('School not found');
   }
 
-  if (!school.benefits_expires_at) {
-    throw new Error('School benefits expiry date is not configured');
-  }
+let benefitsExpiresAt = school.benefits_expires_at;
 
-  const today = new Date().toISOString().slice(0, 10);
-  const benefitExpiryDateOnly = String(school.benefits_expires_at).slice(0, 10);
+if (!benefitsExpiresAt) {
+  benefitsExpiresAt = getExpiryDate();
+
+  const { error: benefitsUpdateError } = await adminClient
+    .from('schools')
+    .update({
+      benefits_started_at:
+        school.benefits_started_at || new Date().toISOString(),
+      benefits_expires_at: benefitsExpiresAt,
+    })
+    .eq('id', school.id);
+
+  if (benefitsUpdateError) {
+    throw new Error(benefitsUpdateError.message);
+  }
+}
+
+const today = new Date().toISOString().slice(0, 10);
+const benefitExpiryDateOnly = String(benefitsExpiresAt).slice(0, 10);
 
   if (benefitExpiryDateOnly < today) {
     throw new Error(
